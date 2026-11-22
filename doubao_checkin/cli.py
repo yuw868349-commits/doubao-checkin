@@ -24,8 +24,10 @@ EXIT_CODES = {
 }
 
 
-def _emit(result: CheckinResult, json_output: bool) -> int:
-    if json_output:
+def _emit(result: CheckinResult, json_output: bool, quiet: bool = False) -> int:
+    if quiet:
+        append_log(f"{result.result}: {result.report}" + (f"；{result.detail}" if result.detail else ""))
+    elif json_output:
         import json
 
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
@@ -99,7 +101,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "silent" and report.already_signed_from_last_result():
         result = CheckinResult("already", detail="今日已有成功记录，跳过")
         write_result(result)
-        return _emit(result, args.json)
+        return _emit(result, args.json, quiet=True)
 
     credential = None
     if args.command == "silent-poll":
@@ -119,6 +121,7 @@ def _run(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         budget_seconds=args.budget,
         credential=credential,
+        url=args.url,
     )
     try:
         from .credentials import session_days_left
@@ -128,7 +131,7 @@ def _run(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001
         pass
     write_result(result)
-    return _emit(result, args.json)
+    return _emit(result, args.json, quiet=args.command == "silent")
 
 
 def _poll(args: argparse.Namespace, credential) -> CheckinResult:
@@ -143,6 +146,7 @@ def _poll(args: argparse.Namespace, credential) -> CheckinResult:
             timeout=args.timeout,
             budget_seconds=args.budget,
             credential=credential,
+            url=args.url,
         )
         if last.result in ("success", "already"):
             return last
@@ -160,6 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--url", default=config.ACTIVITY_URL, help="活动页地址")
         p.add_argument("--headed", action="store_true", help="显示浏览器窗口")
         p.add_argument("--insecure", action="store_true", help="忽略 HTTPS 证书错误")
         p.add_argument("--timeout", type=int, default=15, help="单步超时秒数，默认 15")
