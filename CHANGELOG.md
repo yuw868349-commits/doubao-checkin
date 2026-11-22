@@ -4,7 +4,9 @@
 
 首个公开版本。
 
-- 支持 macOS 客户端钥匙串、Windows DPAPI、环境变量和 `data/cookies.json` 四种凭据来源。
-- 支持 `run`、`silent`、`silent-poll`、`doctor`、`login` 五个命令。
-- 签到失败会留截图和结构化结果，方便定时任务判断。
-- 附带 GitHub Actions 每日签到和 CI。
+- 凭据来源：环境变量、`data/cookies.json`、macOS 钥匙串、Windows DPAPI、`data/profile`。
+- 命令：`run`、`silent`、`silent-poll`、`doctor`、`login`。
+- 状态判断集中在 `state.py`，页面改版只改一处。
+- 导航失败退避重试，整次运行有时间预算。
+- 失败留截图，结果写 `data/last-result.json`，日志写 `data/checkin.log`。
+- 附带 GitHub Actions 每日签到、CI 矩阵和 Dependabot。

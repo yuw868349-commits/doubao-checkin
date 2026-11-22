@@ -10,10 +10,25 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "yuw868349-commits"}]
+keywords = ["doubao", "checkin", "playwright", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
 dependencies = [
     "playwright>=1.40",
     "pycryptodome>=3.19",
 ]
+
+[project.urls]
+Homepage = "https://github.com/yuw868349-commits/doubao-checkin"
+Issues = "https://github.com/yuw868349-commits/doubao-checkin/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "ruff>=0.4"]
