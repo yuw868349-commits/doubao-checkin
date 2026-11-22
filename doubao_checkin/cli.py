@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
-from . import __version__, config, report, state
+from . import __version__, config, report
 from .credentials import load_credential
 from .report import CheckinResult, append_log, write_result
 from .runner import login_and_export, run_checkin
@@ -89,6 +88,9 @@ def _doctor(as_json: bool) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "doctor":
+        return _doctor(args.json)
+
     if args.command == "login":
         result = login_and_export()
         write_result(result)
