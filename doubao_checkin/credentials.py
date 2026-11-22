@@ -13,6 +13,7 @@ import pathlib
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -20,6 +21,23 @@ from dataclasses import dataclass, field
 from . import config
 
 COOKIE_KEYS = ("name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite")
+
+_COOKIE_COLUMNS = "host_key, name, encrypted_value, path, expires_utc, is_httponly, is_secure"
+_COOKIE_SELECT = f"SELECT {_COOKIE_COLUMNS}, samesite FROM cookies"
+# 老版本库没有 samesite 列，退化查询保持列数一致
+_COOKIE_SELECT_LEGACY = f"SELECT {_COOKIE_COLUMNS}, -1 AS samesite FROM cookies"
+
+# Chromium 的 SameSite 枚举：-1 未设置，0 不限制，1 Lax，2 Strict
+_SAME_SITE_DB = {-1: None, 0: "None", 1: "Lax", 2: "Strict"}
+# 浏览器扩展导出的写法：no_restriction / unspecified 之类
+_SAME_SITE_TEXT = {
+    "strict": "Strict",
+    "lax": "Lax",
+    "none": "None",
+    "no_restriction": "None",
+    "unspecified": None,
+    "": None,
+}
 
 
 @dataclass
@@ -29,7 +47,36 @@ class Credential:
     profile_dir: pathlib.Path | None = None
 
 
+def _has_session(cookies: list[dict]) -> bool:
+    return any(cookie.get("name") == "sessionid" for cookie in cookies)
+
+
 # ---------------------------------------------------------------- 通用
+
+
+def _as_expires(raw: object) -> float:
+    """Cookie 过期时间统一成 Unix 秒；认不出来就当会话 Cookie。"""
+    if raw is None:
+        return -1.0
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = str(raw).strip()
+    if not text:
+        return -1.0
+    try:
+        return float(text)
+    except ValueError:
+        return -1.0
+
+
+def _normalize_same_site(raw: object) -> str | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return _SAME_SITE_DB.get(raw, None)
+    return _SAME_SITE_TEXT.get(str(raw).strip().lower(), None)
 
 
 def normalize_cookie(raw: dict) -> dict | None:
@@ -42,16 +89,39 @@ def normalize_cookie(raw: dict) -> dict | None:
     if not value:
         return None
 
-    return {
+    secure = bool(raw.get("secure", raw.get("is_secure", True)))
+    same_site = _normalize_same_site(raw.get("sameSite", raw.get("same_site")))
+    # SameSite=None 必须带 Secure，否则浏览器会当成 Lax 处理
+    if same_site == "None" and not secure:
+        same_site = "Lax"
+
+    cookie = {
         "name": str(name),
         "value": str(value),
         "domain": str(raw.get("domain") or raw.get("host_key") or ".doubao.com"),
         "path": str(raw.get("path") or "/"),
-        "expires": float(raw.get("expires", raw.get("expires_utc", -1)) or -1),
+        "expires": _as_expires(
+            raw.get("expires", raw.get("expires_utc", raw.get("expirationDate")))
+        ),
         "httpOnly": bool(raw.get("httpOnly", raw.get("is_httponly", False))),
-        "secure": bool(raw.get("secure", raw.get("is_secure", True))),
-        "sameSite": raw.get("sameSite") or raw.get("same_site") or "Lax",
+        "secure": secure,
     }
+    if same_site:
+        cookie["sameSite"] = same_site
+    return cookie
+
+
+def _parse_cookie_header(header: str) -> list[dict]:
+    cookies = []
+    if header.lower().startswith("cookie:"):
+        header = header[len("cookie:") :]
+    for chunk in header.split(";"):
+        chunk = chunk.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        name, value = chunk.split("=", 1)
+        cookies.append({"name": name.strip(), "value": value.strip()})
+    return cookies
 
 
 def cookies_from_json(raw: str) -> list[dict]:
@@ -66,28 +136,21 @@ def cookies_from_json(raw: str) -> list[dict]:
     if not isinstance(data, list):
         raise ValueError("Cookie JSON 必须是数组，或带 cookies 字段的对象")
 
-    cookies = []
+    # 数组里混着 "a=b; c=d" 这种字符串也认
+    expanded: list[dict] = []
     for item in data:
         if isinstance(item, str):
-            item = _parse_cookie_header(item)[0] if _parse_cookie_header(item) else {}
-        if not isinstance(item, dict):
-            continue
+            expanded.extend(_parse_cookie_header(item))
+        elif isinstance(item, dict):
+            expanded.append(item)
+
+    cookies = []
+    for item in expanded:
         cookie = normalize_cookie(item)
         if cookie:
             cookies.append(cookie)
     if not cookies:
         raise ValueError("Cookie JSON 里没有可用的 name/value 对")
-    return cookies
-
-
-def _parse_cookie_header(header: str) -> list[dict]:
-    cookies = []
-    for chunk in header.split(";"):
-        chunk = chunk.strip()
-        if not chunk or "=" not in chunk:
-            continue
-        name, value = chunk.split("=", 1)
-        cookies.append({"name": name.strip(), "value": value.strip()})
     return cookies
 
 
@@ -117,7 +180,7 @@ def session_days_left(cookies: list[dict]) -> float | None:
         name = cookie.get("name")
         if name not in config.SESSION_COOKIE_NAMES:
             continue
-        expires = float(cookie.get("expires", -1) or -1)
+        expires = _as_expires(cookie.get("expires"))
         if expires <= 0:
             continue
         days = (expires - now) / 86400
@@ -140,8 +203,90 @@ def save_cookies(cookies: list[dict]) -> pathlib.Path:
     try:
         os.chmod(config.COOKIE_FILE, 0o600)
     except OSError:
+        # Windows 上 chmod 不生效，靠用户目录本身的 ACL
         pass
     return config.COOKIE_FILE
+
+
+# ---------------------------------------------------------------- 客户端 Cookie 库
+
+
+def _copy_db(src: pathlib.Path, dst: pathlib.Path) -> None:
+    """复制 Cookie 库，连 -wal / -shm 一起带走，否则可能读到旧快照。"""
+    shutil.copy2(src, dst)
+    for suffix in ("-wal", "-shm"):
+        side = src.with_name(src.name + suffix)
+        if not side.exists():
+            continue
+        try:
+            shutil.copy2(side, dst.with_name(dst.name + suffix))
+        except OSError:
+            # 客户端正在写的时候 -wal 可能拿不到，主体库仍然可读
+            continue
+
+
+def _query_rows(db: pathlib.Path) -> list[tuple]:
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        try:
+            return conn.execute(_COOKIE_SELECT).fetchall()
+        except sqlite3.OperationalError:
+            return conn.execute(_COOKIE_SELECT_LEGACY).fetchall()
+    finally:
+        conn.close()
+
+
+def _rows_from_copy(db: pathlib.Path) -> list[tuple]:
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = pathlib.Path(tmp) / "Cookies"
+        _copy_db(db, copy)
+        return _query_rows(copy)
+
+
+def _chrome_time(value: object) -> float:
+    try:
+        value = float(value or 0)
+    except (TypeError, ValueError):
+        return -1
+    if value <= 0:
+        return -1
+    # Chromium 的 expires_utc 是 1601-01-01 起的微秒
+    return value / 1_000_000 - 11644473600
+
+
+def _build_cookies(rows: list[tuple], decrypt) -> tuple[list[dict], list[str]]:
+    """把库里的行解成 Playwright 能吃的 Cookie，单条失败不影响其它条。"""
+    cookies: list[dict] = []
+    errors: list[str] = []
+    for host, name, enc, cookie_path, expires, http_only, secure, same_site in rows:
+        try:
+            value = decrypt(bytes(enc or b""))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}: {exc}")
+            continue
+        text = value.decode("utf-8", errors="replace")
+        if not text:
+            continue
+
+        cookie = {
+            "name": name,
+            "value": text,
+            "domain": host,
+            "path": cookie_path or "/",
+            "expires": _chrome_time(expires),
+            "httpOnly": bool(http_only),
+            "secure": bool(secure),
+        }
+        try:
+            site = _SAME_SITE_DB.get(int(same_site), None)
+        except (TypeError, ValueError):
+            site = None
+        if site == "None" and not cookie["secure"]:
+            site = "Lax"
+        if site:
+            cookie["sameSite"] = site
+        cookies.append(cookie)
+    return cookies, errors
 
 
 # ---------------------------------------------------------------- macOS
@@ -150,9 +295,23 @@ def save_cookies(cookies: list[dict]) -> pathlib.Path:
 def _mac_app_dirs() -> list[pathlib.Path]:
     roots = [
         pathlib.Path.home() / "Library/Application Support/Doubao",
-        pathlib.Path.home() / "Library/Containers/com.doubao.desktop/Data/Library/Application Support/Doubao",
+        pathlib.Path.home()
+        / "Library/Containers/com.doubao.desktop/Data/Library/Application Support/Doubao",
     ]
     return [path for path in roots if path.exists()]
+
+
+def _mac_cookie_paths(root: pathlib.Path) -> list[pathlib.Path]:
+    patterns = ("Cookies", "*/Cookies", "*/Network/Cookies", "*/*/Network/Cookies")
+    found: list[pathlib.Path] = []
+    seen: set[pathlib.Path] = set()
+    for pattern in patterns:
+        for path in sorted(root.glob(pattern)):
+            if not path.is_file() or path in seen:
+                continue
+            seen.add(path)
+            found.append(path)
+    return found
 
 
 def _mac_key() -> bytes | None:
@@ -179,61 +338,34 @@ def _mac_key() -> bytes | None:
         return None
 
 
-def _mac_decrypt(value: bytes, key: bytes) -> bytes:
-    from Crypto.Cipher import AES
+def _unpad(plain: bytes) -> bytes:
+    """Chromium 用 PKCS#7 填充；更老的版本用空格填充，两种都认。"""
+    if not plain:
+        return plain
+    pad = plain[-1]
+    if 1 <= pad <= 16 and plain.endswith(bytes([pad]) * pad):
+        return plain[:-pad]
+    return plain.rstrip(b" ")
 
+
+def _mac_decrypt(value: bytes, key: bytes) -> bytes:
     if value[:3] == b"v10":
+        from Crypto.Cipher import AES
+
         iv = b" " * 16
         cipher = AES.new(key, AES.MODE_CBC, iv)
-        plain = cipher.decrypt(value[3:])
-        if plain.endswith(b"\x20\x20"):
-            plain = plain[:-2]
-        return plain
+        return _unpad(cipher.decrypt(value[3:]))
     if value[:3] == b"v20":
         raise RuntimeError("Cookie 是 v20/App-Bound 加密，当前不支持")
     return value
 
 
 def _read_mac_cookies(path: pathlib.Path, key: bytes) -> list[dict]:
-    with tempfile.TemporaryDirectory() as tmp:
-        copy = pathlib.Path(tmp) / "Cookies"
-        shutil.copy2(path, copy)
-        conn = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
-        try:
-            rows = conn.execute("SELECT host_key, name, encrypted_value, path, expires_utc, is_httponly, is_secure FROM cookies").fetchall()
-        finally:
-            conn.close()
-
-    cookies = []
-    for host, name, enc, cookie_path, expires, http_only, secure in rows:
-        try:
-            value = _mac_decrypt(bytes(enc or b""), key).decode("utf-8", errors="replace")
-        except Exception:
-            continue
-        if not value:
-            continue
-        cookies.append({
-            "name": name,
-            "value": value,
-            "domain": host,
-            "path": cookie_path or "/",
-            "expires": _chrome_time(expires),
-            "httpOnly": bool(http_only),
-            "secure": bool(secure),
-            "sameSite": "Lax",
-        })
+    rows = _rows_from_copy(path)
+    cookies, errors = _build_cookies(rows, lambda enc: _mac_decrypt(enc, key))
+    if rows and not cookies and errors:
+        raise RuntimeError(f"{len(errors)} 条 Cookie 解密失败：{errors[0]}")
     return cookies
-
-
-def _chrome_time(value) -> float:
-    try:
-        value = float(value or 0)
-    except (TypeError, ValueError):
-        return -1
-    if value <= 0:
-        return -1
-    # Chromium 的 expires_utc 是 1601-01-01 起的微秒
-    return value / 1_000_000 - 11644473600
 
 
 def _load_mac() -> Credential | None:
@@ -242,16 +374,24 @@ def _load_mac() -> Credential | None:
         return None
     key = _mac_key()
     if not key:
-        return None
+        raise RuntimeError(
+            "找不到钥匙串里的 Doubao Safe Storage 密钥，"
+            "确认豆包电脑版已登录，且允许当前用户读取钥匙串"
+        )
+
+    problems: list[str] = []
     for root in dirs:
-        candidates = sorted(root.glob("*/Cookies")) + sorted(root.glob("Cookies"))
-        for path in candidates:
+        for path in _mac_cookie_paths(root):
             try:
                 cookies = _read_mac_cookies(path, key)
-            except (OSError, sqlite3.Error):
+            except (OSError, sqlite3.Error, RuntimeError) as exc:
+                problems.append(f"{path.name}：{exc}")
                 continue
-            if any(cookie["name"] == "sessionid" for cookie in cookies):
+            if _has_session(cookies):
                 return Credential(cookies, mode="mac-client")
+            problems.append(f"{path}：没有 sessionid")
+    if problems:
+        raise RuntimeError("macOS 客户端 Cookie 不可用：" + "；".join(problems[:2]))
     return None
 
 
@@ -283,6 +423,19 @@ def _win_app_dirs() -> list[pathlib.Path]:
     return found
 
 
+def _win_cookie_dbs(root: pathlib.Path) -> list[pathlib.Path]:
+    patterns = ("Network/Cookies", "*/Network/Cookies", "*/*/Network/Cookies")
+    found: list[pathlib.Path] = []
+    seen: set[pathlib.Path] = set()
+    for pattern in patterns:
+        for path in sorted(root.glob(pattern)):
+            if not path.is_file() or path in seen:
+                continue
+            seen.add(path)
+            found.append(path)
+    return found
+
+
 def _win_master_key(local_state: pathlib.Path) -> bytes | None:
     try:
         payload = json.loads(local_state.read_text(encoding="utf-8"))
@@ -299,7 +452,8 @@ def _win_master_key(local_state: pathlib.Path) -> bytes | None:
         class DATA_BLOB(ctypes.Structure):
             _fields_ = [("cbData", wt.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
 
-        blob_in = DATA_BLOB(len(raw), ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_char)))
+        buf = ctypes.create_string_buffer(raw, len(raw))
+        blob_in = DATA_BLOB(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
         blob_out = DATA_BLOB()
         if not ctypes.windll.crypt32.CryptUnprotectData(
             ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
@@ -315,9 +469,15 @@ def _win_master_key(local_state: pathlib.Path) -> bytes | None:
 
 def _win_decrypt(value: bytes, key: bytes) -> bytes:
     if value[:3] == b"v10":
+        if len(value) < 31:
+            raise RuntimeError("v10 密文长度不足，无法校验 GCM tag")
         from Crypto.Cipher import AES
 
-        return AES.new(key, AES.MODE_GCM, nonce=value[3:15]).decrypt(value[15:])
+        nonce, body, tag = value[3:15], value[15:-16], value[-16:]
+        try:
+            return AES.new(key, AES.MODE_GCM, nonce=nonce).decrypt_and_verify(body, tag)
+        except ValueError as exc:
+            raise RuntimeError("GCM 校验失败，主密钥不匹配或数据损坏") from exc
     if value[:3] == b"v20":
         raise RuntimeError("Cookie 是 v20/App-Bound 加密，当前不支持")
     return value
@@ -325,7 +485,7 @@ def _win_decrypt(value: bytes, key: bytes) -> bytes:
 
 def _copy_locked_db(path: pathlib.Path, target: pathlib.Path) -> bool:
     try:
-        shutil.copy2(path, target)
+        _copy_db(path, target)
         return True
     except OSError:
         pass
@@ -339,96 +499,86 @@ def _copy_locked_db(path: pathlib.Path, target: pathlib.Path) -> bool:
         return False
 
 
-def _query_cookies(db: pathlib.Path) -> list[tuple]:
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    try:
-        return conn.execute(
-            "SELECT host_key, name, encrypted_value, path, expires_utc, is_httponly, is_secure FROM cookies"
-        ).fetchall()
-    finally:
-        conn.close()
-
-
 def _read_win_cookies(db: pathlib.Path, key: bytes) -> list[dict]:
     with tempfile.TemporaryDirectory() as tmp:
         copy = pathlib.Path(tmp) / "Cookies"
         if not _copy_locked_db(db, copy):
             raise RuntimeError(f"Cookie 库被占用，复制失败：{db}")
-        rows = _query_cookies(copy)
+        rows = _query_rows(copy)
 
-    cookies = []
-    for host, name, enc, cookie_path, expires, http_only, secure in rows:
-        try:
-            value = _win_decrypt(bytes(enc or b""), key).decode("utf-8", errors="replace")
-        except Exception:
-            continue
-        if not value:
-            continue
-        cookies.append({
-            "name": name,
-            "value": value,
-            "domain": host,
-            "path": cookie_path or "/",
-            "expires": _chrome_time(expires),
-            "httpOnly": bool(http_only),
-            "secure": bool(secure),
-            "sameSite": "Lax",
-        })
+    cookies, errors = _build_cookies(rows, lambda enc: _win_decrypt(enc, key))
+    if rows and not cookies and errors:
+        raise RuntimeError(f"{len(errors)} 条 Cookie 解密失败：{errors[0]}")
     return cookies
 
 
 def _load_windows() -> Credential | None:
     if os.name != "nt":
         return None
+
+    problems: list[str] = []
     for root in _win_app_dirs():
+        dbs = _win_cookie_dbs(root)
+        if not dbs:
+            continue
         local_state = root / "Local State"
         if not local_state.exists():
             local_state = root / "User Data" / "Local State"
-        db_candidates = sorted(root.glob("*/Network/Cookies")) + sorted(root.glob("Network/Cookies"))
-        if not db_candidates:
-            continue
         key = _win_master_key(local_state) if local_state.exists() else None
         if not key:
+            problems.append(f"{local_state}：读不到 DPAPI 主密钥")
             continue
-        for db in db_candidates:
+        for db in dbs:
             try:
                 cookies = _read_win_cookies(db, key)
-            except (OSError, sqlite3.Error, RuntimeError):
+            except (OSError, sqlite3.Error, RuntimeError) as exc:
+                problems.append(f"{db.parent.name}：{exc}")
                 continue
-            if any(cookie["name"] == "sessionid" for cookie in cookies):
+            if _has_session(cookies):
                 return Credential(cookies, mode="windows-client")
+            problems.append(f"{db}：没有 sessionid")
+    if problems:
+        raise RuntimeError("Windows 客户端 Cookie 不可用：" + "；".join(problems[:2]))
     return None
 
 
 # ---------------------------------------------------------------- 对外
 
 
-def load_credential(prefer_profile: bool = False) -> Credential:
-    if prefer_profile and config.PROFILE_DIR.exists():
-        return Credential(mode="profile", profile_dir=config.PROFILE_DIR)
-
-    try:
-        injected = _load_injected()
-    except RuntimeError:
-        raise
+def load_credential() -> Credential:
+    injected = _load_injected()
     if injected:
         return injected
 
-    if os.name == "posix" and __import__("sys").platform == "darwin":
-        mac = _load_mac()
+    problems: list[str] = []
+
+    if sys.platform == "darwin":
+        try:
+            mac = _load_mac()
+        except RuntimeError as exc:
+            problems.append(str(exc))
+            mac = None
         if mac:
             return mac
 
     if os.name == "nt":
-        win = _load_windows()
+        try:
+            win = _load_windows()
+        except RuntimeError as exc:
+            problems.append(str(exc))
+            win = None
         if win:
             return win
 
+    # 客户端凭据不可用时还能退回持久化 profile
     if config.PROFILE_DIR.exists():
         return Credential(mode="profile", profile_dir=config.PROFILE_DIR)
 
-    raise RuntimeError(
+    message = (
         "没有找到登录凭据。macOS/Windows 请先登录豆包电脑版；"
         "Linux 请设置 DOUBAO_COOKIES_JSON 或 data/cookies.json；"
         "也可以运行 python checkin.py login"
     )
+    if problems:
+        message = "；".join(problems) + "。" + message
+    raise RuntimeError(message)
