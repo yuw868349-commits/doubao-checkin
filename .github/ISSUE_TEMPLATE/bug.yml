@@ -1,0 +1,51 @@
+name: Bug 反馈
+description: 签到失败、结果码不对、页面改版
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请不要把 Cookie、截图里的账号信息或完整日志贴上来。
+        截图只保留活动卡片区域就够了。
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 运行环境
+      options:
+        - macOS 客户端
+        - Windows 客户端
+        - Linux / 服务器
+        - GitHub Actions
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本或提交
+      placeholder: 0.1.0 / commit sha
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 包括执行的命令、结果码，以及能公开的最小日志。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 你期望的结果
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 内容里没有 Cookie、token 或个人信息
+          required: true

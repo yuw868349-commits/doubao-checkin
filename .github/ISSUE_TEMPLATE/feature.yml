@@ -1,0 +1,24 @@
+name: 功能建议
+description: 新平台支持、新的运行方式
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: 想要什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: 使用场景
+      description: 说清楚现在哪里不方便，比只写“希望支持 XX”有用。
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 这个建议不涉及绕过官方风控或批量注册
+          required: true
