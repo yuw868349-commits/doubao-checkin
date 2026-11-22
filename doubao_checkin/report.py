@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from dataclasses import asdict, dataclass, field
 
 from . import config
@@ -31,6 +32,9 @@ NEEDS_ATTENTION = {
     "NO_CREDENTIAL",
     "ERROR",
 }
+
+MAX_LOG_BYTES = 512 * 1024
+KEEP_LOG_LINES = 2000
 
 
 def now_str() -> str:
@@ -60,13 +64,29 @@ class CheckinResult:
         return data
 
 
+def _atomic_write(path, text: str) -> None:
+    """先写临时文件再替换，外部定时任务不会读到半截 JSON。"""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def append_log(message: str) -> None:
     line = f"[{now_str()}] {message}\n"
     try:
         config.ensure_dirs()
-        if config.LOG_FILE.exists() and config.LOG_FILE.stat().st_size > 512 * 1024:
-            lines = config.LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-            config.LOG_FILE.write_text("".join(lines[len(lines) // 2 :]), encoding="utf-8")
+        if config.LOG_FILE.exists() and config.LOG_FILE.stat().st_size > MAX_LOG_BYTES:
+            lines = config.LOG_FILE.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines(keepends=True)[-KEEP_LOG_LINES:]
+            _atomic_write(config.LOG_FILE, "".join(lines))
         with config.LOG_FILE.open("a", encoding="utf-8") as handle:
             handle.write(line)
     except OSError:
@@ -78,10 +98,7 @@ def write_result(result: CheckinResult) -> None:
     payload["saved_at"] = now_str()
     try:
         config.ensure_dirs()
-        config.RESULT_FILE.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _atomic_write(config.RESULT_FILE, json.dumps(payload, ensure_ascii=False, indent=2))
     except OSError:
         pass
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import pathlib
 import sys
 
 from . import __version__, config, report
@@ -28,8 +30,6 @@ def _emit(result: CheckinResult, json_output: bool, quiet: bool = False) -> int:
     if quiet:
         append_log(f"{result.result}: {result.report}" + (f"；{result.detail}" if result.detail else ""))
     elif json_output:
-        import json
-
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     else:
         print(f"[{result.result}] {result.report}")
@@ -68,19 +68,22 @@ def _doctor(as_json: bool) -> int:
         info["playwright"] = "missing"
         problems.append("没有安装 playwright")
 
-    try:
-        from playwright.sync_api import sync_playwright
+    info["chromium"] = None
+    if info["playwright"] == "ok":
+        try:
+            from playwright.sync_api import sync_playwright
 
-        with sync_playwright() as playwright:
-            info["chromium"] = str(playwright.chromium.executable_path)
-    except Exception as exc:  # noqa: BLE001
-        info["chromium"] = None
-        problems.append(f"Chromium 不可用：{exc}")
+            with sync_playwright() as playwright:
+                executable = pathlib.Path(playwright.chromium.executable_path)
+            info["chromium"] = str(executable)
+            if not executable.exists():
+                info["chromium"] = None
+                problems.append("Chromium 没装好：先运行 `playwright install chromium`")
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"Chromium 不可用：{exc}")
 
     info["problems"] = problems
     if as_json:
-        import json
-
         print(json.dumps(info, ensure_ascii=False, indent=2))
     else:
         for key, value in info.items():
@@ -94,7 +97,10 @@ def _run(args: argparse.Namespace) -> int:
         return _doctor(args.json)
 
     if args.command == "login":
-        result = login_and_export()
+        try:
+            result = login_and_export()
+        except Exception as exc:  # noqa: BLE001
+            result = CheckinResult("BROWSER", detail=f"{type(exc).__name__}: {exc}")
         write_result(result)
         return _emit(result, args.json)
 
@@ -103,7 +109,6 @@ def _run(args: argparse.Namespace) -> int:
         write_result(result)
         return _emit(result, args.json, quiet=True)
 
-    credential = None
     if args.command == "silent-poll":
         try:
             credential = load_credential()
@@ -115,21 +120,14 @@ def _run(args: argparse.Namespace) -> int:
         write_result(result)
         return _emit(result, args.json, quiet=True)
 
+    # run 自己会处理没有凭据的情况，这里的 session_days_left 也由它填
     result = run_checkin(
         headed=args.headed,
         ignore_https_errors=args.insecure,
         timeout=args.timeout,
         budget_seconds=args.budget,
-        credential=credential,
         url=args.url,
     )
-    try:
-        from .credentials import session_days_left
-
-        if credential and credential.cookies:
-            result.session_days_left = session_days_left(credential.cookies)
-    except Exception:  # noqa: BLE001
-        pass
     write_result(result)
     return _emit(result, args.json, quiet=args.command == "silent")
 
@@ -171,7 +169,11 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--budget", type=int, default=config.BUDGET_SECONDS, help="整次运行预算秒数")
         p.add_argument("--json", action="store_true", help="输出 JSON")
 
-    for name, help_text in (("run", "签到一次"), ("silent", "静默签到，今天成功过就跳过"), ("silent-poll", "失败时在窗口内轮询")):
+    for name, help_text in (
+        ("run", "签到一次"),
+        ("silent", "静默签到，今天成功过就跳过"),
+        ("silent-poll", "失败时在窗口内轮询"),
+    ):
         p = sub.add_parser(name, help=help_text)
         common(p)
         if name == "silent-poll":
@@ -197,4 +199,4 @@ def main(argv: list[str] | None = None) -> int:
         append_log(f"未捕获异常：{type(exc).__name__}: {exc}")
         result = CheckinResult("ERROR", detail=f"{type(exc).__name__}: {exc}")
         write_result(result)
-        return _emit(result, args.json)
+        return _emit(result, getattr(args, "json", False))

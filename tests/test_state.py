@@ -23,7 +23,22 @@ def test_unknown_state():
 
 def test_client_only_banner():
     assert state.is_client_only("仅支持在豆包电脑版签到")
+    assert state.is_client_only("请前往豆包电脑版完成任务")
+    assert not state.is_client_only("每日签到\n立即签到")
+
+
+def test_login_wall():
     assert state.needs_login("扫码登录\n登录后同步你的对话")
+
+
+def test_login_entry_only():
+    assert state.needs_login("登录\n注册\n帮助中心")
+
+
+def test_card_page_is_not_a_login_wall():
+    """卡片已经渲染出来时，正文里出现「登录」不算登录墙。"""
+    assert not state.needs_login("登录后每日签到领额度\n每日签到\n立即签到")
+    assert not state.needs_login("每日签到\n签到领额度")
 
 
 def test_plain_page_needs_no_login():

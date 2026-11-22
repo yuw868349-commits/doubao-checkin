@@ -95,21 +95,23 @@ def _click_entry_then_button(page: Page, budget: Budget) -> str | None:
     return None
 
 
-def _screenshot(page: Page, prefix: str = "result") -> str | None:
+def _screenshot(page: Page | None, prefix: str = "result") -> str | None:
+    if page is None:
+        return None
     config.ensure_dirs()
     name = f"{prefix}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
     path = config.SHOTS_DIR / name
     try:
         page.screenshot(path=str(path), full_page=True)
-        return str(path.relative_to(config.REPO_ROOT))
-    except ValueError:
-        return str(path)
     except PlaywrightError:
         try:
             page.screenshot(path=str(path))
-            return str(path.relative_to(config.REPO_ROOT))
-        except Exception:
-            return str(path) if path.exists() else None
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        return str(path.relative_to(config.REPO_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def _playwright_cookies(cookies: list[dict]) -> list[dict]:
@@ -186,6 +188,7 @@ def run_checkin(
     try:
         with sync_playwright() as playwright:
             browser, context = _open_session(playwright, credential, headed, ignore_https_errors)
+            page: Page | None = None
             try:
                 if timeout:
                     context.set_default_timeout(timeout * 1000)
@@ -194,15 +197,16 @@ def run_checkin(
                 _goto(page, url or config.ACTIVITY_URL, budget)
                 body = _body_text(page)
 
-                if state.needs_login(body):
-                    result.result = "AUTH_ERROR"
-                    result.screenshot = _screenshot(page, "auth")
-                    return _finish(result, "活动页要求登录，Cookie 可能已过期")
-
+                # 客户端专用提示要排在登录判断前面：那段文案里通常也带「登录」两个字
                 if state.is_client_only(body):
                     result.result = "CLIENT_ONLY"
                     result.screenshot = _screenshot(page, "client-only")
                     return _finish(result, "页面提示仅支持电脑版客户端")
+
+                if state.needs_login(body):
+                    result.result = "AUTH_ERROR"
+                    result.screenshot = _screenshot(page, "auth")
+                    return _finish(result, "活动页要求登录，Cookie 可能已过期")
 
                 clicked = None
                 if not state.is_signed(body):
@@ -218,25 +222,21 @@ def run_checkin(
 
             except PlaywrightTimeout as exc:
                 result.result = "TIMEOUT"
-                result.detail = f"页面操作超时：{exc}"
                 result.screenshot = _screenshot(page, "timeout")
-                return result
+                return _finish(result, f"页面操作超时：{exc}")
             except TimeoutError as exc:
+                # Budget.check 抛的是内置 TimeoutError，不是 Playwright 的那个
                 result.result = "TIMEOUT"
-                result.detail = str(exc)
-                return result
+                return _finish(result, str(exc))
             except PlaywrightError as exc:
                 result.result = "BROWSER"
-                result.detail = f"浏览器错误：{exc}"
-                return result
+                return _finish(result, f"浏览器错误：{exc}")
             except RuntimeError as exc:
                 result.result = "NETWORK" if "页面打不开" in str(exc) else "BROWSER"
-                result.detail = str(exc)
-                return result
-            except Exception as exc:
+                return _finish(result, str(exc))
+            except Exception as exc:  # noqa: BLE001
                 result.result = "ERROR"
-                result.detail = f"{type(exc).__name__}: {exc}"
-                return result
+                return _finish(result, f"{type(exc).__name__}: {exc}")
             finally:
                 try:
                     context.close()
@@ -247,16 +247,13 @@ def run_checkin(
 
     except PlaywrightError as exc:
         result.result = "BROWSER"
-        result.detail = f"浏览器错误：{exc}"
-        return result
+        return _finish(result, f"浏览器错误：{exc}")
     except RuntimeError as exc:
         result.result = "BROWSER"
-        result.detail = str(exc)
-        return result
-    except Exception as exc:
+        return _finish(result, str(exc))
+    except Exception as exc:  # noqa: BLE001
         result.result = "ERROR"
-        result.detail = f"{type(exc).__name__}: {exc}"
-        return result
+        return _finish(result, f"{type(exc).__name__}: {exc}")
 
 
 def _launch(playwright: Playwright, headed: bool) -> Browser:
@@ -280,20 +277,24 @@ def login_and_export() -> CheckinResult:
             headless=False,
             **_context_kwargs(False),
         )
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto(config.START_URL, wait_until="domcontentloaded")
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto(config.START_URL, wait_until="domcontentloaded")
 
-        deadline = time.monotonic() + 300
-        while time.monotonic() < deadline:
-            cookies = context.cookies()
-            if any(cookie.get("name") == "sessionid" and cookie.get("value") for cookie in cookies):
-                break
-            page.wait_for_timeout(1_500)
-        else:
+            deadline = time.monotonic() + config.BUDGET_SECONDS
+            while time.monotonic() < deadline:
+                cookies = context.cookies()
+                if any(c.get("name") == "sessionid" and c.get("value") for c in cookies):
+                    break
+                page.wait_for_timeout(1_500)
+            else:
+                return _finish(
+                    CheckinResult("TIMEOUT"),
+                    f"等待扫码超过 {config.BUDGET_SECONDS} 秒",
+                )
+
+            cookies = [c for c in context.cookies() if "doubao.com" in (c.get("domain") or "")]
+            path = save_cookies(cookies)
+            return _finish(CheckinResult("success"), f"已保存 {len(cookies)} 条 Cookie 到 {path}")
+        finally:
             context.close()
-            return _finish(CheckinResult("TIMEOUT", detail="等待扫码超过 5 分钟"))
-
-        cookies = [c for c in context.cookies() if "doubao.com" in (c.get("domain") or "")]
-        path = save_cookies(cookies)
-        context.close()
-        return _finish(CheckinResult("success", detail=f"已保存 {len(cookies)} 条 Cookie 到 {path}"))

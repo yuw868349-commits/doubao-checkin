@@ -11,6 +11,25 @@ ALREADY_TEXTS = ("已签到", "明日再来", "今日已领")
 
 ENTRY_TEXTS = ("免费领额度", "领额度", "积分")
 
+# 页面上一出现这些字样就说明签到卡片已经渲染出来，不需要再判登录。
+# 故意不收裸「签到」「积分」：这两个词在登录页的推广文案里也会出现。
+CARD_TEXTS = (
+    "每日签到",
+    "立即签到",
+    "立即领取",
+    "签到领额度",
+    "今日签到",
+    "免费领额度",
+    "领额度",
+)
+
+CLIENT_ONLY_TEXTS = (
+    "仅支持在豆包电脑版",
+    "仅支持在豆包工作电脑版",
+    "请使用豆包电脑版",
+    "请前往豆包电脑版",
+)
+
 
 def is_signed(body: str) -> bool:
     """卡片在、按钮不在，就算已签。
@@ -36,13 +55,16 @@ def classify(body: str, clicked: bool) -> str:
 
 
 def is_client_only(body: str) -> bool:
-    return "仅支持在豆包电脑版" in body or "仅支持在豆包工作电脑版" in body
+    return any(text in body for text in CLIENT_ONLY_TEXTS)
 
 
 def needs_login(body: str) -> bool:
-    """页面出现扫码登录，或者登录字样但没有任何签到相关按钮。"""
+    """页面出现扫码登录，或者只有登录入口、看不到任何签到相关字样。
+
+    卡片已经渲染出来时一律不算登录墙：页面里「登录」二字经常出现在无关文案里。
+    """
     if "扫码登录" in body:
         return True
-    if "登录" not in body:
+    if any(text in body for text in CARD_TEXTS):
         return False
-    return not any(text in body for text in ("立即签到", "立即领取", "签到"))
+    return "登录" in body
