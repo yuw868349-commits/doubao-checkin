@@ -1,5 +1,9 @@
 # doubao-checkin
 
+[![CI](https://github.com/yuw868349-commits/doubao-checkin/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/yuw868349-commits/doubao-checkin/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 豆包「额度天天送」每日签到。打开活动页，点一次签到，把结果写进 `data/last-result.json`，定时任务读这个文件就行。
 
 这不是官方项目。页面改版、规则收紧、客户端校验升级，都会让它失效。
@@ -21,6 +25,8 @@
 
 ## 快速开始
 
+需要 Python 3.10+ 和能跑 Playwright 的环境。
+
 ```bash
 git clone https://github.com/yuw868349-commits/doubao-checkin.git
 cd doubao-checkin
@@ -34,7 +40,7 @@ python checkin.py doctor
 python checkin.py run
 ```
 
-`doctor` 会检查 Playwright、Chromium、凭据和目录写入权限。它不联网。
+`doctor` 检查 Playwright、Chromium、凭据和目录写入权限，不联网。
 
 ## 登录方式
 
@@ -60,7 +66,7 @@ Windows 的 v20 / App-Bound 加密暂不支持，遇到会明确报错，不会�
 python checkin.py login
 ```
 
-会打开有头浏览器，登录完回终端按回车。登录态存在 `data/profile`，同时会把 `doubao.com` 的 Cookie 导出到 `data/cookies.json`（权限 600）。后续 `run` 会优先用这份 Cookie。
+会打开有头浏览器，脚本检测到 `sessionid` 后自动继续，不用回终端按键。登录态存在 `data/profile`，同时把 `doubao.com` 的 Cookie 导出到 `data/cookies.json`（权限 600）。下次运行优先用环境变量或这份 Cookie，没有再回落到 `data/profile`。
 
 没有桌面的服务器跑不了这一步，用 Cookie 注入。
 
@@ -93,12 +99,12 @@ python checkin.py run
 | 命令 | 说明 |
 | --- | --- |
 | `python checkin.py run` | 执行一次，结果打到 stdout |
-| `python checkin.py silent` | 执行一次，结果只写 `data/checkin.log` |
-| `python checkin.py silent-poll` | 当天已签过就秒退，没签再补 |
+| `python checkin.py silent` | 执行一次，不打印；结果写日志和 `last-result.json`，当天成功过就直接跳过 |
+| `python checkin.py silent-poll` | 同 `silent`，遇到网络、超时或未知状态时在窗口内重试 |
 | `python checkin.py doctor` | 离线自检 |
-| `python checkin.py login` | 手动登录并导出 Cookie |
+| `python checkin.py login` | 手动登录，写 `data/profile` 并导出 Cookie |
 
-通用参数：`--url` 换活动页，`--headed` 显示浏览器，`--insecure` 忽略证书错误（抓包代理环境用），`--timeout` 单步超时，`--budget` 整次运行预算。
+通用参数：`--url` 换活动页，`--headed` 显示浏览器，`--insecure` 忽略证书错误（抓包代理环境用），`--timeout` 单步超时，`--budget` 整次运行预算，`--json` 输出结构化结果。
 
 ## 结果码
 
@@ -107,11 +113,13 @@ python checkin.py run
 | `success` | 签到成功 | 0 |
 | `already` | 今天已经签过 | 0 |
 | `AUTH_ERROR` | 登录态失效 | 2 |
-| `NETWORK` | 页面打不开 | 3 |
-| `CLIENT_ONLY` | 被判定成网页端 | 4 |
-| `NO_CREDENTIAL` | 没有可用凭据 | 5 |
-| `unknown` | 页面状态没认出来 | 1 |
-| `TIMEOUT` / `BROWSER` / `ERROR` | 环境或运行异常 | 1 |
+| `CLIENT_ONLY` | 被判定成网页端 | 3 |
+| `NETWORK` | 页面打不开 | 4 |
+| `TIMEOUT` | 时间预算或页面操作超时 | 5 |
+| `BROWSER` | Chromium / Playwright 异常 | 6 |
+| `NO_CREDENTIAL` | 没有可用凭据 | 7 |
+| `unknown` | 页面状态没认出来 | 8 |
+| `ERROR` | 未预期异常 | 9 |
 
 `data/last-result.json` 每次覆盖写，只有本次结果，不含 Cookie。
 
@@ -123,7 +131,22 @@ python checkin.py run
 2. 在 fork 的 Settings → Secrets and variables → Actions 里加 `DOUBAO_COOKIES_JSON`
 3. 需要时在 Actions 页面点 `Run workflow`
 
-注意：别人 fork 你的仓库，用不了你仓库里的 Secret。每个 fork 要自己配。别把 Cookie 写进 workflow 文件。
+别人 fork 你的仓库，用不了你仓库里的 Secret，每个 fork 要自己配。别把 Cookie 写进 workflow 文件。
+
+## 项目结构
+
+```text
+checkin.py               兼容入口，python checkin.py <命令>
+doubao_checkin/
+  cli.py                 命令解析、doctor、退出码
+  runner.py              浏览器流程：导航、点击、截图
+  credentials.py         环境变量 / Cookie 文件 / macOS / Windows 凭据
+  state.py               页面文案与状态判断
+  report.py              结果码、日志、last-result.json
+  config.py              路径、UA、时间预算
+tests/                   状态判断、Cookie、命令行
+docs/cookies.md          取 Cookie 的几种方式
+```
 
 ## 为什么这么做
 
@@ -138,9 +161,9 @@ python checkin.py run
 ## 已知限制
 
 - 页面文案改版要改 `doubao_checkin/state.py`，集中在一个文件里
-- Cookie 会话大约 30 天，过期会返回 `AUTH_ERROR`
+- `sessionid` 大约 30 天过期，之后返回 `AUTH_ERROR`
 - `data/profile` 模式在部分环境下会被识别成网页端，优先用客户端凭据或 Cookie
-- Windows v20/App-Bound 加密的 Cookie 解不了
+- Windows v20 / App-Bound 加密的 Cookie 解不了
 - 无头浏览器不是 100% 隐形，官方要封就是会封
 
 ## 实测

@@ -26,7 +26,7 @@ python checkin.py run
 python checkin.py login
 ```
 
-会弹出一个浏览器窗口，扫码登录后自动把 `doubao.com` 的 Cookie 写到 `data/cookies.json`，权限 600。
+会弹出一个浏览器窗口，扫码登录后自动把 `doubao.com` 的 Cookie 写到 `data/cookies.json`，权限 600；同时保留 `data/profile` 持久化登录态。脚本检测到 `sessionid` 就继续，不用回终端按键。
 
 ## 三、自己粘贴 Cookie
 
