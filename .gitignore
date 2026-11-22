@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# 运行产物，绝对不要提交
+data/
+cookies.json
+*.log
+.env
+.DS_Store
