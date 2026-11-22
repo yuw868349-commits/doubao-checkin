@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
-import os
 import time
-from typing import Callable
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
-from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from . import config, state
 from .credentials import Credential, save_cookies
