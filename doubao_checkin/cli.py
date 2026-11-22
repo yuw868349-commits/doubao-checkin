@@ -110,10 +110,10 @@ def _run(args: argparse.Namespace) -> int:
         except RuntimeError as exc:
             result = CheckinResult("NO_CREDENTIAL", detail=str(exc))
             write_result(result)
-            return _emit(result, args.json)
+            return _emit(result, args.json, quiet=True)
         result = _poll(args, credential)
         write_result(result)
-        return _emit(result, args.json)
+        return _emit(result, args.json, quiet=True)
 
     result = run_checkin(
         headed=args.headed,
