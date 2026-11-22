@@ -54,11 +54,11 @@ python checkin.py run
 
 ### macOS / Windows 客户端
 
-macOS 从钥匙串取 `Doubao Safe Storage` 密钥，解 `~/Library/Application Support/Doubao/*/Cookies`。
+macOS 从钥匙串取 `Doubao Safe Storage` 密钥，解 `~/Library/Application Support/Doubao` 下的 `Cookies`，AES-128-CBC 的 PKCS#7 与老版空格填充都能处理。
 
-Windows 从 `%LOCALAPPDATA%` 找豆包客户端目录，用 DPAPI 解 `Local State` 里的密钥，再解 Cookie 库。客户端开着的时候 Cookie 库会被占用，脚本先普通拷贝，失败再用 `esentutl` 备份拷贝；还失败就关掉客户端跑一次，或者直接走 Cookie 注入。
+Windows 从 `%LOCALAPPDATA%` 找豆包客户端目录，用 DPAPI 解 `Local State` 里的密钥，再解 Cookie 库。客户端开着的时候 Cookie 库会被占用，脚本先普通拷贝（连 `-wal` 一起带走），失败再用 `esentutl` 备份拷贝；还失败就关掉客户端跑一次，或者直接走 Cookie 注入。
 
-Windows 的 v20 / App-Bound 加密暂不支持，遇到会明确报错，不会拿空 Cookie 硬跑。
+AES-GCM 会逐条校验 tag，校验不过的 Cookie 直接丢弃，不会把带垃圾尾巴的值拿去用。v20 / App-Bound 加密暂不支持，遇到会在 `detail` 里写明原因，不会拿空 Cookie 硬跑。
 
 ### 手动登录
 
@@ -164,6 +164,7 @@ docs/cookies.md          取 Cookie 的几种方式
 - `sessionid` 大约 30 天过期，之后返回 `AUTH_ERROR`
 - `data/profile` 模式在部分环境下会被识别成网页端，优先用客户端凭据或 Cookie
 - Windows v20 / App-Bound 加密的 Cookie 解不了
+- 客户端 Cookie 全部解密失败时返回 `NO_CREDENTIAL`，`detail` 里写第一条失败原因
 - 无头浏览器不是 100% 隐形，官方要封就是会封
 
 ## 实测
@@ -172,7 +173,7 @@ docs/cookies.md          取 Cookie 的几种方式
 | --- | --- | --- |
 | 2026-11-22 | Linux + Cookie 注入 | 签到成功，200 额度 |
 
-客户端凭据路径沿用作者自用脚本的实现，macOS 真机跑过；Windows 的 DPAPI + AES-GCM 逻辑没有在本仓库环境复测。有 Windows 机器的话欢迎提 issue 反馈。
+客户端凭据路径沿用作者自用脚本的实现。两端的解密与去填充在 `tests/test_credentials.py` 里用 Chromium 真实格式的合成数据覆盖；Windows 的 DPAPI 取密钥部分没有在本仓库环境复测。有 Windows 机器的话欢迎提 issue 反馈。
 
 ## 安全
 
