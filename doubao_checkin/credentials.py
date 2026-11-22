@@ -173,8 +173,6 @@ def _mac_key() -> bytes | None:
 
 def _mac_decrypt(value: bytes, key: bytes) -> bytes:
     from Crypto.Cipher import AES
-    from Crypto.Hash import SHA1
-    from Crypto.Protocol.KDF import PBKDF2
 
     if value[:3] == b"v10":
         iv = b" " * 16
