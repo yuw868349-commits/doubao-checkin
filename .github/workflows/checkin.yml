@@ -23,6 +23,12 @@ jobs:
           python-version: "3.12"
       - run: pip install -e .
       - run: playwright install --with-deps chromium
-      - run: python checkin.py run --json
+      - name: Run check-in
         env:
           DOUBAO_COOKIES_JSON: ${{ secrets.DOUBAO_COOKIES_JSON }}
+        run: |
+          if [ -z "$DOUBAO_COOKIES_JSON" ]; then
+            echo "::warning::DOUBAO_COOKIES_JSON is not set; skipping."
+            exit 0
+          fi
+          python checkin.py run --json
