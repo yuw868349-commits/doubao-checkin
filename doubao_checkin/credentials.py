@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 
 from . import config
@@ -110,17 +111,24 @@ def _load_injected() -> Credential | None:
 
 
 def session_days_left(cookies: list[dict]) -> float | None:
-    best = None
+    primary, fallback = [], []
+    now = time.time()
     for cookie in cookies:
-        if cookie.get("name") not in config.SESSION_COOKIE_NAMES:
+        name = cookie.get("name")
+        if name not in config.SESSION_COOKIE_NAMES:
             continue
         expires = float(cookie.get("expires", -1) or -1)
         if expires <= 0:
             continue
-        days = (expires - __import__("time").time()) / 86400
-        if days > 0 and (best is None or days > best):
-            best = days
-    return round(best, 1) if best else None
+        days = (expires - now) / 86400
+        if days <= 0:
+            continue
+        if name in ("sessionid", "sessionid_ss"):
+            primary.append(days)
+        else:
+            fallback.append(days)
+    pool = primary or fallback
+    return round(min(pool), 1) if pool else None
 
 
 def save_cookies(cookies: list[dict]) -> pathlib.Path:
