@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: doubao-checkin
+  cancel-in-progress: false
+
 jobs:
   checkin:
     runs-on: ubuntu-latest

@@ -38,10 +38,16 @@ def test_empty_json_is_an_error():
         credentials.cookies_from_json("[]")
 
 
-def test_session_days_left_uses_latest_expiry():
+def test_session_days_left_prefers_session_cookie():
     soon = {"name": "sessionid", "value": "x", "expires": time.time() + 86400}
     later = {"name": "sid_guard", "value": "x", "expires": time.time() + 86400 * 30}
     days = credentials.session_days_left([soon, later])
+    assert days and 0.9 <= days <= 1.1
+
+
+def test_session_days_left_falls_back():
+    only = {"name": "sid_guard", "value": "x", "expires": time.time() + 86400 * 30}
+    days = credentials.session_days_left([only])
     assert days and 29.0 <= days <= 30.0
 
 
