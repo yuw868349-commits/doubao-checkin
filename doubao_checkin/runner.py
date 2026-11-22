@@ -10,7 +10,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from . import config, state
-from .credentials import Credential, save_cookies
+from .credentials import Credential, load_credential, save_cookies, session_days_left
 from .report import CheckinResult, append_log
 
 
@@ -28,6 +28,7 @@ class Budget:
 
 RETRY_DELAYS = (5, 10, 20)
 GATEWAY_MARKERS = ("502 Bad Gateway", "503 Service Unavailable", "504 Gateway Time-out", "ERR_EMPTY_RESPONSE")
+COOKIE_FIELDS = ("name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite")
 
 
 def _body_text(page: Page) -> str:
@@ -101,34 +102,58 @@ def _screenshot(page: Page, prefix: str = "result") -> str | None:
     try:
         page.screenshot(path=str(path), full_page=True)
         return str(path.relative_to(config.REPO_ROOT))
+    except ValueError:
+        return str(path)
     except PlaywrightError:
         try:
             page.screenshot(path=str(path))
             return str(path.relative_to(config.REPO_ROOT))
-        except PlaywrightError:
-            return None
+        except Exception:
+            return str(path) if path.exists() else None
 
 
-def _open_context(browser: Browser, credential: Credential, headless: bool) -> BrowserContext:
-    kwargs = {
+def _playwright_cookies(cookies: list[dict]) -> list[dict]:
+    cleaned = []
+    for cookie in cookies:
+        item = {key: cookie[key] for key in COOKIE_FIELDS if key in cookie}
+        if not item.get("domain"):
+            continue
+        item.setdefault("path", "/")
+        cleaned.append(item)
+    return cleaned
+
+
+def _context_kwargs(ignore_https_errors: bool) -> dict:
+    return {
         "user_agent": config.CLIENT_UA,
         "viewport": config.VIEWPORT,
         "locale": "zh-CN",
         "timezone_id": "Asia/Shanghai",
+        "ignore_https_errors": ignore_https_errors,
     }
-    if credential.mode == "profile" and credential.profile_dir:
-        return browser.new_context(**kwargs)
 
-    context = browser.new_context(**kwargs)
-    if credential.cookies:
-        cleaned = []
-        for cookie in credential.cookies:
-            item = {key: cookie[key] for key in ("name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite") if key in cookie}
-            if item.get("expires", -1) and item["expires"] > 0:
-                pass
-            cleaned.append(item)
-        context.add_cookies(cleaned)
-    return context
+
+def _open_session(
+    playwright: Playwright,
+    credential: Credential,
+    headed: bool,
+    ignore_https_errors: bool,
+) -> tuple[Browser | None, BrowserContext]:
+    if credential.mode == "profile" and credential.profile_dir:
+        credential.profile_dir.mkdir(parents=True, exist_ok=True)
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(credential.profile_dir),
+            headless=not headed,
+            **_context_kwargs(ignore_https_errors),
+        )
+        return None, context
+
+    browser = _launch(playwright, headed)
+    context = browser.new_context(**_context_kwargs(ignore_https_errors))
+    cookies = _playwright_cookies(credential.cookies)
+    if cookies:
+        context.add_cookies(cookies)
+    return browser, context
 
 
 def _finish(result: CheckinResult, detail: str | None = None) -> CheckinResult:
@@ -144,9 +169,8 @@ def run_checkin(
     timeout: int | None = None,
     budget_seconds: int | None = None,
     credential: Credential | None = None,
+    url: str | None = None,
 ) -> CheckinResult:
-    from .credentials import load_credential
-
     budget = Budget(budget_seconds or config.BUDGET_SECONDS)
     try:
         credential = credential or load_credential()
@@ -154,72 +178,85 @@ def run_checkin(
         return _finish(CheckinResult("NO_CREDENTIAL", detail=str(exc)))
 
     append_log(f"启动，凭据来源 {credential.mode}，Cookie {len(credential.cookies)} 条")
-    if credential.cookies:
-        days = __import__("doubao_checkin.credentials", fromlist=["session_days_left"]).session_days_left(credential.cookies)
-        if days:
-            append_log(f"会话剩余约 {days} 天")
+    days = session_days_left(credential.cookies) if credential.cookies else None
+    if days:
+        append_log(f"会话剩余约 {days} 天")
 
-    result = CheckinResult("ERROR", mode=credential.mode)
-    with sync_playwright() as playwright:
-        browser = _launch(playwright, headed)
-        context = _open_context(browser, credential, headed)
-        if timeout:
-            context.set_default_timeout(timeout * 1000)
-        page = context.new_page()
+    result = CheckinResult("ERROR", mode=credential.mode, session_days_left=days)
+    try:
+        with sync_playwright() as playwright:
+            browser, context = _open_session(playwright, credential, headed, ignore_https_errors)
+            try:
+                if timeout:
+                    context.set_default_timeout(timeout * 1000)
+                page = context.new_page()
 
-        try:
-            _goto(page, config.ACTIVITY_URL, budget)
-            body = _body_text(page)
-
-            if state.needs_login(body):
-                result.result = "AUTH_ERROR"
-                result.screenshot = _screenshot(page, "auth")
-                return _finish(result, "活动页要求登录，Cookie 可能已过期")
-
-            if state.is_client_only(body):
-                result.result = "CLIENT_ONLY"
-                result.screenshot = _screenshot(page, "client-only")
-                return _finish(result, "页面提示仅支持电脑版客户端")
-
-            clicked = None
-            if not state.is_signed(body):
-                clicked = _click_entry_then_button(page, budget)
+                _goto(page, url or config.ACTIVITY_URL, budget)
                 body = _body_text(page)
 
-            verdict = state.classify(body, clicked is not None)
-            result.result = verdict
-            result.screenshot = _screenshot(page)
-            if verdict == "unknown":
-                return _finish(result, "没有找到签到按钮，也没有识别出已签状态")
-            return _finish(result, f"点击了「{clicked}」" if clicked else None)
+                if state.needs_login(body):
+                    result.result = "AUTH_ERROR"
+                    result.screenshot = _screenshot(page, "auth")
+                    return _finish(result, "活动页要求登录，Cookie 可能已过期")
 
-        except TimeoutError as exc:
-            result.result = "TIMEOUT"
-            result.detail = str(exc)
-            return result
-        except PlaywrightTimeout as exc:
-            result.result = "TIMEOUT"
-            result.detail = f"页面操作超时：{exc}"
-            result.screenshot = _screenshot(page, "timeout")
-            return result
-        except PlaywrightError as exc:
-            result.result = "BROWSER"
-            result.detail = f"浏览器错误：{exc}"
-            return result
-        except RuntimeError as exc:
-            result.result = "NETWORK"
-            result.detail = str(exc)
-            return result
-        except Exception as exc:
-            result.result = "ERROR"
-            result.detail = f"{type(exc).__name__}: {exc}"
-            return result
-        finally:
-            try:
-                context.close()
-                browser.close()
-            except PlaywrightError:
-                pass
+                if state.is_client_only(body):
+                    result.result = "CLIENT_ONLY"
+                    result.screenshot = _screenshot(page, "client-only")
+                    return _finish(result, "页面提示仅支持电脑版客户端")
+
+                clicked = None
+                if not state.is_signed(body):
+                    clicked = _click_entry_then_button(page, budget)
+                    body = _body_text(page)
+
+                verdict = state.classify(body, clicked is not None)
+                result.result = verdict
+                result.screenshot = _screenshot(page)
+                if verdict == "unknown":
+                    return _finish(result, "没有找到签到按钮，也没有识别出已签状态")
+                return _finish(result, f"点击了「{clicked}」" if clicked else None)
+
+            except PlaywrightTimeout as exc:
+                result.result = "TIMEOUT"
+                result.detail = f"页面操作超时：{exc}"
+                result.screenshot = _screenshot(page, "timeout")
+                return result
+            except TimeoutError as exc:
+                result.result = "TIMEOUT"
+                result.detail = str(exc)
+                return result
+            except PlaywrightError as exc:
+                result.result = "BROWSER"
+                result.detail = f"浏览器错误：{exc}"
+                return result
+            except RuntimeError as exc:
+                result.result = "NETWORK" if "页面打不开" in str(exc) else "BROWSER"
+                result.detail = str(exc)
+                return result
+            except Exception as exc:
+                result.result = "ERROR"
+                result.detail = f"{type(exc).__name__}: {exc}"
+                return result
+            finally:
+                try:
+                    context.close()
+                    if browser:
+                        browser.close()
+                except PlaywrightError:
+                    pass
+
+    except PlaywrightError as exc:
+        result.result = "BROWSER"
+        result.detail = f"浏览器错误：{exc}"
+        return result
+    except RuntimeError as exc:
+        result.result = "BROWSER"
+        result.detail = str(exc)
+        return result
+    except Exception as exc:
+        result.result = "ERROR"
+        result.detail = f"{type(exc).__name__}: {exc}"
+        return result
 
 
 def _launch(playwright: Playwright, headed: bool) -> Browser:
@@ -232,13 +269,18 @@ def _launch(playwright: Playwright, headed: bool) -> Browser:
         ) from exc
 
 
-def login_and_export(headed: bool = True) -> CheckinResult:
+def login_and_export() -> CheckinResult:
     """打开浏览器让人扫码，登录后把 Cookie 存到 data/cookies.json。"""
     append_log("登录模式启动，等待扫码")
+    config.ensure_dirs()
+    config.PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False)
-        context = browser.new_context(user_agent=config.CLIENT_UA, viewport=config.VIEWPORT, locale="zh-CN")
-        page = context.new_page()
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(config.PROFILE_DIR),
+            headless=False,
+            **_context_kwargs(False),
+        )
+        page = context.pages[0] if context.pages else context.new_page()
         page.goto(config.START_URL, wait_until="domcontentloaded")
 
         deadline = time.monotonic() + 300
@@ -249,11 +291,9 @@ def login_and_export(headed: bool = True) -> CheckinResult:
             page.wait_for_timeout(1_500)
         else:
             context.close()
-            browser.close()
             return _finish(CheckinResult("TIMEOUT", detail="等待扫码超过 5 分钟"))
 
         cookies = [c for c in context.cookies() if "doubao.com" in (c.get("domain") or "")]
         path = save_cookies(cookies)
         context.close()
-        browser.close()
         return _finish(CheckinResult("success", detail=f"已保存 {len(cookies)} 条 Cookie 到 {path}"))
