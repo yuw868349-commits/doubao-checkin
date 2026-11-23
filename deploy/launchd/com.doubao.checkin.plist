@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.doubao.checkin</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/doubao-checkin/.venv/bin/python</string>
+    <string>/opt/doubao-checkin/checkin.py</string>
+    <string>silent</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/doubao-checkin</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>8</integer>
+    <key>Minute</key><integer>10</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/doubao-checkin.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/doubao-checkin.err</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

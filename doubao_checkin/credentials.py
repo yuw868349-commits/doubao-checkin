@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import pathlib
@@ -20,12 +21,10 @@ from dataclasses import dataclass, field
 
 from . import config
 
-COOKIE_KEYS = ("name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite")
-
 _COOKIE_COLUMNS = "host_key, name, encrypted_value, path, expires_utc, is_httponly, is_secure"
-_COOKIE_SELECT = f"SELECT {_COOKIE_COLUMNS}, samesite FROM cookies"
+_COOKIE_SELECT = f"SELECT {_COOKIE_COLUMNS}, samesite FROM cookies"  # noqa: S608
 # 老版本库没有 samesite 列，退化查询保持列数一致
-_COOKIE_SELECT_LEGACY = f"SELECT {_COOKIE_COLUMNS}, -1 AS samesite FROM cookies"
+_COOKIE_SELECT_LEGACY = f"SELECT {_COOKIE_COLUMNS}, -1 AS samesite FROM cookies"  # noqa: S608
 
 # Chromium 的 SameSite 枚举：-1 未设置，0 不限制，1 Lax，2 Strict
 _SAME_SITE_DB = {-1: None, 0: "None", 1: "Lax", 2: "Strict"}
@@ -48,25 +47,32 @@ class Credential:
 
 
 def _has_session(cookies: list[dict]) -> bool:
-    return any(cookie.get("name") == "sessionid" for cookie in cookies)
+    return any(cookie.get("name") in config.SESSION_COOKIE_NAMES for cookie in cookies)
 
 
 # ---------------------------------------------------------------- 通用
 
 
 def _as_expires(raw: object) -> float:
-    """Cookie 过期时间统一成 Unix 秒；认不出来就当会话 Cookie。"""
-    if raw is None:
+    """Cookie 过期时间统一成 Unix 秒；认不出来、0、负数都当会话 Cookie。"""
+    if raw is None or isinstance(raw, bool):
         return -1.0
     if isinstance(raw, (int, float)):
-        return float(raw)
-    text = str(raw).strip()
-    if not text:
+        value = float(raw)
+    else:
+        text = str(raw).strip()
+        if not text:
+            return -1.0
+        try:
+            value = float(text)
+        except ValueError:
+            return -1.0
+    if value <= 0:
         return -1.0
-    try:
-        return float(text)
-    except ValueError:
-        return -1.0
+    # 有些导出工具给的是毫秒时间戳，Playwright 只认秒，直接传会抛错
+    if value > 1e11:
+        value /= 1000.0
+    return value
 
 
 def _normalize_same_site(raw: object) -> str | None:
@@ -75,8 +81,8 @@ def _normalize_same_site(raw: object) -> str | None:
     if isinstance(raw, bool):
         return None
     if isinstance(raw, int):
-        return _SAME_SITE_DB.get(raw, None)
-    return _SAME_SITE_TEXT.get(str(raw).strip().lower(), None)
+        return _SAME_SITE_DB.get(raw)
+    return _SAME_SITE_TEXT.get(str(raw).strip().lower())
 
 
 def normalize_cookie(raw: dict) -> dict | None:
@@ -196,15 +202,15 @@ def session_days_left(cookies: list[dict]) -> float | None:
 
 def save_cookies(cookies: list[dict]) -> pathlib.Path:
     config.ensure_dirs()
-    config.COOKIE_FILE.write_text(
+    tmp = config.COOKIE_FILE.with_name(config.COOKIE_FILE.name + ".tmp")
+    tmp.write_text(
         json.dumps(cookies, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    try:
-        os.chmod(config.COOKIE_FILE, 0o600)
-    except OSError:
-        # Windows 上 chmod 不生效，靠用户目录本身的 ACL
-        pass
+    # Windows 上 chmod 不生效，靠用户目录本身的 ACL
+    with contextlib.suppress(OSError):
+        tmp.chmod(0o600)
+    tmp.replace(config.COOKIE_FILE)
     return config.COOKIE_FILE
 
 
@@ -245,13 +251,13 @@ def _rows_from_copy(db: pathlib.Path) -> list[tuple]:
 
 def _chrome_time(value: object) -> float:
     try:
-        value = float(value or 0)
+        number = float(str(value or 0))
     except (TypeError, ValueError):
         return -1
-    if value <= 0:
+    if number <= 0:
         return -1
     # Chromium 的 expires_utc 是 1601-01-01 起的微秒
-    return value / 1_000_000 - 11644473600
+    return number / 1_000_000 - 11644473600
 
 
 def _build_cookies(rows: list[tuple], decrypt) -> tuple[list[dict], list[str]]:
@@ -264,7 +270,11 @@ def _build_cookies(rows: list[tuple], decrypt) -> tuple[list[dict], list[str]]:
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{name}: {exc}")
             continue
-        text = value.decode("utf-8", errors="replace")
+        try:
+            text = value.decode("utf-8")
+        except UnicodeDecodeError:
+            errors.append(f"{name}: 解密结果不是 UTF-8")
+            continue
         if not text:
             continue
 
@@ -278,7 +288,7 @@ def _build_cookies(rows: list[tuple], decrypt) -> tuple[list[dict], list[str]]:
             "secure": bool(secure),
         }
         try:
-            site = _SAME_SITE_DB.get(int(same_site), None)
+            site = _SAME_SITE_DB.get(int(same_site))
         except (TypeError, ValueError):
             site = None
         if site == "None" and not cookie["secure"]:
@@ -320,10 +330,12 @@ def _mac_key() -> bytes | None:
         try:
             out = subprocess.run(
                 ["security", "find-generic-password", "-s", service, "-w"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if out.returncode == 0 and out.stdout.strip():
-                password = out.stdout.strip().encode()
+                password = out.stdout.strip()
                 break
         except (OSError, subprocess.SubprocessError):
             continue
@@ -436,6 +448,36 @@ def _win_cookie_dbs(root: pathlib.Path) -> list[pathlib.Path]:
     return found
 
 
+def _dpapi_unprotect(raw: bytes) -> bytes | None:
+    """调 Windows DPAPI 解开一段密文。非 Windows 或调用失败返回 None。"""
+    if not raw:
+        return None
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+    except ImportError:
+        return None
+
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return None
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wt.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(raw, len(raw))
+    blob_in = DATA_BLOB(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    if not windll.crypt32.CryptUnprotectData(
+        ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
+    ):
+        return None
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        windll.kernel32.LocalFree(blob_out.pbData)
+
+
 def _win_master_key(local_state: pathlib.Path) -> bytes | None:
     try:
         payload = json.loads(local_state.read_text(encoding="utf-8"))
@@ -445,24 +487,7 @@ def _win_master_key(local_state: pathlib.Path) -> bytes | None:
         raw = base64.b64decode(encrypted)
         if raw[:5] != b"DPAPI":
             return None
-        raw = raw[5:]
-        import ctypes
-        import ctypes.wintypes as wt
-
-        class DATA_BLOB(ctypes.Structure):
-            _fields_ = [("cbData", wt.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
-        buf = ctypes.create_string_buffer(raw, len(raw))
-        blob_in = DATA_BLOB(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
-        blob_out = DATA_BLOB()
-        if not ctypes.windll.crypt32.CryptUnprotectData(
-            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
-        ):
-            return None
-        try:
-            return ctypes.string_at(blob_out.pbData, blob_out.cbData)
-        finally:
-            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+        return _dpapi_unprotect(raw[5:])
     except (OSError, ValueError, AttributeError):
         return None
 
@@ -492,7 +517,9 @@ def _copy_locked_db(path: pathlib.Path, target: pathlib.Path) -> bool:
     try:
         subprocess.run(
             ["esentutl", "/y", str(path), "/vss", "/d", str(target)],
-            capture_output=True, timeout=30, check=False,
+            capture_output=True,
+            timeout=30,
+            check=False,
         )
         return target.exists()
     except (OSError, subprocess.SubprocessError):
@@ -513,9 +540,7 @@ def _read_win_cookies(db: pathlib.Path, key: bytes) -> list[dict]:
 
 
 def _load_windows() -> Credential | None:
-    if os.name != "nt":
-        return None
-
+    # 不靠 os.name 判断：目录存在就尝试读，DPAPI 在非 Windows 上会返回 None。
     problems: list[str] = []
     for root in _win_app_dirs():
         dbs = _win_cookie_dbs(root)
@@ -545,34 +570,45 @@ def _load_windows() -> Credential | None:
 # ---------------------------------------------------------------- 对外
 
 
-def load_credential() -> Credential:
-    injected = _load_injected()
-    if injected:
-        return injected
-
+def load_credential(exclude: set[str] | None = None) -> Credential:
+    """按优先级找凭据。exclude 里的来源跳过，用于登录态失效后的回落。"""
+    exclude = exclude or set()
     problems: list[str] = []
+    candidates: list[Credential] = []
 
-    if sys.platform == "darwin":
+    try:
+        injected = _load_injected()
+    except RuntimeError as exc:
+        problems.append(str(exc))
+        injected = None
+    if injected:
+        candidates.append(injected)
+
+    if sys.platform == "darwin" and "mac-client" not in exclude:
         try:
             mac = _load_mac()
         except RuntimeError as exc:
             problems.append(str(exc))
             mac = None
         if mac:
-            return mac
+            candidates.append(mac)
 
-    if os.name == "nt":
+    if "windows-client" not in exclude:
         try:
             win = _load_windows()
         except RuntimeError as exc:
             problems.append(str(exc))
             win = None
         if win:
-            return win
+            candidates.append(win)
 
     # 客户端凭据不可用时还能退回持久化 profile
-    if config.PROFILE_DIR.exists():
-        return Credential(mode="profile", profile_dir=config.PROFILE_DIR)
+    if config.PROFILE_DIR.exists() and "profile" not in exclude:
+        candidates.append(Credential(mode="profile", profile_dir=config.PROFILE_DIR))
+
+    for candidate in candidates:
+        if candidate.mode not in exclude:
+            return candidate
 
     message = (
         "没有找到登录凭据。macOS/Windows 请先登录豆包电脑版；"

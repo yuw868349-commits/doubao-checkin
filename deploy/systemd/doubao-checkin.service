@@ -1,0 +1,13 @@
+[Unit]
+Description=Doubao daily check-in
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=doubao
+WorkingDirectory=/opt/doubao-checkin
+Environment=DOUBAO_DATA_DIR=/var/lib/doubao-checkin
+ExecStart=/opt/doubao-checkin/.venv/bin/python checkin.py silent
+TimeoutStartSec=360
+Nice=10

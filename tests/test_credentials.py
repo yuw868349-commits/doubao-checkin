@@ -53,7 +53,9 @@ def make_db(path, rows, with_samesite=True) -> None:
 
 
 def test_normalize_accepts_val_alias():
-    cookie = credentials.normalize_cookie({"name": "sessionid", "val": "abc", "host_key": ".doubao.com"})
+    cookie = credentials.normalize_cookie(
+        {"name": "sessionid", "val": "abc", "host_key": ".doubao.com"}
+    )
     assert cookie["value"] == "abc"
     assert cookie["domain"] == ".doubao.com"
 
@@ -198,7 +200,16 @@ def test_reads_mac_cookie_db(tmp_path):
         db,
         [
             (".doubao.com", "sessionid", mac_encrypt(b"abc123"), "/", expires, 1, 1, 1),
-            (".doubao.com", "sid_guard", mac_encrypt_space_padded(b"def456"), "/", expires, 0, 1, 2),
+            (
+                ".doubao.com",
+                "sid_guard",
+                mac_encrypt_space_padded(b"def456"),
+                "/",
+                expires,
+                0,
+                1,
+                2,
+            ),
         ],
     )
 
@@ -227,3 +238,232 @@ def test_all_cookies_failing_raises(tmp_path):
     make_db(db, [(".doubao.com", "sessionid", b"v20" + b"x" * 32, "/", 0, 1, 1, -1)])
     with pytest.raises(RuntimeError, match="v20"):
         credentials._read_mac_cookies(db, MAC_KEY)
+
+
+# ---------------------------------------------------------------- 过期时间归一化
+
+
+def test_expires_zero_becomes_session_cookie():
+    cookie = credentials.normalize_cookie({"name": "sessionid", "value": "x", "expires": 0})
+    assert cookie["expires"] == -1
+
+
+def test_expires_negative_becomes_session_cookie():
+    cookie = credentials.normalize_cookie({"name": "sessionid", "value": "x", "expires": -5})
+    assert cookie["expires"] == -1
+
+
+def test_expires_milliseconds_are_scaled():
+    cookie = credentials.normalize_cookie(
+        {"name": "sessionid", "value": "x", "expires": 1893456000000}
+    )
+    assert cookie["expires"] == pytest.approx(1893456000.0)
+
+
+def test_expires_seconds_are_kept():
+    cookie = credentials.normalize_cookie(
+        {"name": "sessionid", "value": "x", "expirationDate": 1893456000.5}
+    )
+    assert cookie["expires"] == pytest.approx(1893456000.5)
+
+
+def test_expires_bool_is_rejected():
+    cookie = credentials.normalize_cookie({"name": "sessionid", "value": "x", "expires": True})
+    assert cookie["expires"] == -1
+
+
+# ---------------------------------------------------------------- 会话判断
+
+
+@pytest.mark.parametrize("name", ["sessionid", "sessionid_ss", "sid_tt", "sid_guard"])
+def test_has_session_accepts_all_session_names(name):
+    assert credentials._has_session([{"name": name, "value": "x"}])
+
+
+def test_has_session_rejects_unrelated_cookie():
+    assert not credentials._has_session([{"name": "theme", "value": "dark"}])
+
+
+# ---------------------------------------------------------------- DPAPI
+
+
+def test_dpapi_unprotect_returns_none_off_windows():
+    # Linux/macOS 上没有 ctypes.windll
+    assert credentials._dpapi_unprotect(b"data") is None
+
+
+def test_dpapi_unprotect_rejects_empty_input():
+    assert credentials._dpapi_unprotect(b"") is None
+
+
+def test_win_master_key_rejects_non_dpapi_payload(tmp_path):
+    import base64
+
+    state = tmp_path / "Local State"
+    state.write_text(
+        json.dumps({"os_crypt": {"encrypted_key": base64.b64encode(b"XXXXXabc").decode()}}),
+        encoding="utf-8",
+    )
+    assert credentials._win_master_key(state) is None
+
+
+def test_win_master_key_handles_missing_file(tmp_path):
+    assert credentials._win_master_key(tmp_path / "missing") is None
+
+
+def test_win_master_key_handles_broken_json(tmp_path):
+    state = tmp_path / "Local State"
+    state.write_text("{oops", encoding="utf-8")
+    assert credentials._win_master_key(state) is None
+
+
+# ---------------------------------------------------------------- 降级链
+
+
+def test_load_credential_skips_excluded_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        credentials,
+        "_load_injected",
+        lambda: credentials.Credential([{"name": "sessionid", "value": "x"}], mode="env"),
+    )
+    monkeypatch.setattr(credentials.config, "PROFILE_DIR", tmp_path / "profile")
+    (tmp_path / "profile").mkdir()
+
+    cred = credentials.load_credential(exclude={"env"})
+    assert cred.mode == "profile"
+
+
+def test_load_credential_survives_bad_env(tmp_path, monkeypatch):
+    def boom():
+        raise RuntimeError("DOUBAO_COOKIES_JSON 解析失败")
+
+    monkeypatch.setattr(credentials, "_load_injected", boom)
+    monkeypatch.setattr(credentials.config, "PROFILE_DIR", tmp_path / "profile")
+    (tmp_path / "profile").mkdir()
+
+    cred = credentials.load_credential()
+    assert cred.mode == "profile"
+
+
+def test_load_credential_reports_problems_when_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(credentials, "_load_injected", lambda: None)
+    monkeypatch.setattr(credentials.config, "PROFILE_DIR", tmp_path / "missing")
+    with pytest.raises(RuntimeError, match="没有找到登录凭据"):
+        credentials.load_credential()
+
+
+def test_save_cookies_replaces_atomically(tmp_path, monkeypatch):
+    target = tmp_path / "cookies.json"
+    monkeypatch.setattr(credentials.config, "COOKIE_FILE", target)
+    monkeypatch.setattr(credentials.config, "ensure_dirs", lambda: None)
+
+    credentials.save_cookies([{"name": "sessionid", "value": "one"}])
+    credentials.save_cookies([{"name": "sessionid", "value": "two"}])
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload == [{"name": "sessionid", "value": "two"}]
+    assert not (tmp_path / "cookies.json.tmp").exists()
+
+
+def test_build_cookies_drops_invalid_utf8():
+    rows = [(".doubao.com", "sessionid", b"\xff\xfe", "/", 0, 1, 1, -1)]
+    cookies, errors = credentials._build_cookies(rows, lambda enc: enc)
+    assert cookies == []
+    assert errors and "UTF-8" in errors[0]
+
+
+# ---------------------------------------------------------------- 客户端整条路径
+
+
+def test_load_injected_from_file(tmp_path, monkeypatch):
+    target = tmp_path / "cookies.json"
+    target.write_text(json.dumps([{"name": "sessionid", "value": "x"}]), encoding="utf-8")
+    monkeypatch.setattr(credentials.config, "COOKIE_FILE", target)
+    monkeypatch.delenv("DOUBAO_COOKIES_JSON", raising=False)
+    cred = credentials._load_injected()
+    assert cred and cred.mode == "injected"
+    assert cred.cookies[0]["value"] == "x"
+
+
+def test_load_injected_reports_broken_json(tmp_path, monkeypatch):
+    target = tmp_path / "cookies.json"
+    target.write_text("{oops", encoding="utf-8")
+    monkeypatch.setattr(credentials.config, "COOKIE_FILE", target)
+    monkeypatch.delenv("DOUBAO_COOKIES_JSON", raising=False)
+    with pytest.raises(RuntimeError, match="读取失败"):
+        credentials._load_injected()
+
+
+def test_session_days_left_skips_expired():
+    assert (
+        credentials.session_days_left(
+            [{"name": "sessionid", "value": "x", "expires": time.time() - 100}]
+        )
+        is None
+    )
+
+
+def test_load_mac_reads_session(tmp_path, monkeypatch):
+    root = tmp_path / "Doubao"
+    db = root / "Default" / "Network" / "Cookies"
+    db.parent.mkdir(parents=True)
+    make_db(db, [(".doubao.com", "sessionid", mac_encrypt(b"abc"), "/", 0, 1, 1, 1)])
+
+    monkeypatch.setattr(credentials, "_mac_app_dirs", lambda: [root])
+    monkeypatch.setattr(credentials, "_mac_key", lambda: MAC_KEY)
+    cred = credentials._load_mac()
+    assert cred and cred.mode == "mac-client"
+    assert cred.cookies[0]["value"] == "abc"
+
+
+def test_load_mac_reports_missing_key(tmp_path, monkeypatch):
+    root = tmp_path / "Doubao"
+    root.mkdir()
+    monkeypatch.setattr(credentials, "_mac_app_dirs", lambda: [root])
+    monkeypatch.setattr(credentials, "_mac_key", lambda: None)
+    with pytest.raises(RuntimeError, match="钥匙串"):
+        credentials._load_mac()
+
+
+def test_load_mac_reports_missing_session(tmp_path, monkeypatch):
+    root = tmp_path / "Doubao"
+    db = root / "Default" / "Network" / "Cookies"
+    db.parent.mkdir(parents=True)
+    make_db(db, [(".doubao.com", "theme", mac_encrypt(b"dark"), "/", 0, 1, 1, 1)])
+
+    monkeypatch.setattr(credentials, "_mac_app_dirs", lambda: [root])
+    monkeypatch.setattr(credentials, "_mac_key", lambda: MAC_KEY)
+    with pytest.raises(RuntimeError, match="不可用"):
+        credentials._load_mac()
+
+
+def test_load_windows_reads_session(tmp_path, monkeypatch):
+    local = tmp_path / "Local"
+    root = local / "Doubao"
+    db = root / "Default" / "Network" / "Cookies"
+    db.parent.mkdir(parents=True)
+    make_db(db, [(".doubao.com", "sessionid", win_encrypt(b"abc"), "/", 0, 1, 1, 1)])
+    (root / "Local State").write_text(
+        json.dumps({"os_crypt": {"encrypted_key": "x"}}), encoding="utf-8"
+    )
+
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setattr(credentials, "_win_master_key", lambda path: WIN_KEY)
+    cred = credentials._load_windows()
+    assert cred and cred.mode == "windows-client"
+    assert cred.cookies[0]["value"] == "abc"
+
+
+def test_load_windows_without_localappdata(monkeypatch):
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    assert credentials._load_windows() is None
+
+
+def test_win_app_dirs_finds_nested_user_data(tmp_path, monkeypatch):
+    local = tmp_path / "Local"
+    nested = local / "SomeRandomDir" / "User Data"
+    nested.mkdir(parents=True)
+    (nested / "Local State").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+
+    dirs = credentials._win_app_dirs()
+    assert nested in dirs

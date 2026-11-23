@@ -12,6 +12,9 @@ concurrency:
   group: doubao-checkin
   cancel-in-progress: false
 
+env:
+  TZ: Asia/Shanghai
+
 jobs:
   checkin:
     runs-on: ubuntu-latest
@@ -21,6 +24,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
       - run: pip install -e .
       - run: playwright install --with-deps chromium
       - name: Run check-in
@@ -28,7 +32,33 @@ jobs:
           DOUBAO_COOKIES_JSON: ${{ secrets.DOUBAO_COOKIES_JSON }}
         run: |
           if [ -z "$DOUBAO_COOKIES_JSON" ]; then
-            echo "::warning::DOUBAO_COOKIES_JSON is not set; skipping."
-            exit 0
+            echo "::error::DOUBAO_COOKIES_JSON 没有配置，签到没有执行。"
+            exit 1
           fi
-          python checkin.py run --json
+          python checkin.py run --json --block-resources
+      - name: Upload failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkin-shots
+          path: data/shots/*.png
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Write summary
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import pathlib
+
+          path = pathlib.Path("data/last-result.json")
+          print("## 豆包签到\n")
+          if not path.exists():
+              print("没有生成结果文件，检查上一步日志。")
+          else:
+              data = json.loads(path.read_text(encoding="utf-8"))
+              print("| 字段 | 值 |")
+              print("| --- | --- |")
+              for key in ("result", "report", "mode", "detail", "saved_at", "duration_ms"):
+                  print(f"| {key} | {data.get(key)} |")
+          PY

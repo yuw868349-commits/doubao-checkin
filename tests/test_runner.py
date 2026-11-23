@@ -67,3 +67,27 @@ def test_run_checkin_reports_missing_credential(tmp_path, monkeypatch):
     assert result.result == "NO_CREDENTIAL"
     assert "没有找到登录凭据" in (result.detail or "")
     assert (tmp_path / "checkin.log").exists()
+
+
+def test_prune_screenshots_keeps_newest(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(runner.config, "SHOTS_DIR", tmp_path)
+    for i in range(40):
+        path = tmp_path / f"{i:02d}.png"
+        path.write_bytes(b"x")
+        os.utime(path, (i, i))
+
+    runner._prune_screenshots(keep=10)
+    left = sorted(path.name for path in tmp_path.glob("*.png"))
+    assert len(left) == 10
+    assert left == [f"{i:02d}.png" for i in range(30, 40)]
+
+
+def test_prune_screenshots_tolerates_missing_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner.config, "SHOTS_DIR", tmp_path / "missing")
+    runner._prune_screenshots()
+
+
+def test_navigation_error_is_runtime_error():
+    assert issubclass(runner.NavigationError, RuntimeError)

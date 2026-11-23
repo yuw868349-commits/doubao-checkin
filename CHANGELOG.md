@@ -1,5 +1,36 @@
 # 更新记录
 
+## 0.2.0 - 2026-11-23
+
+按代码审计结果修了一轮，重点是「没签到却显示成功」的静默失败。
+
+- 状态判断重写。`is_signed` 不再用「按钮不存在」证明「已经签过」，改成
+  `card_state()` 五态机：失败文案、可点按钮、已签文案、只有标题、什么都没有。
+  标题在但按钮还没渲染时返回 `unknown` 并留截图，不再猜成 `already`。
+- 按钮文案只认「立即签到」的问题修了。`立即领取` / `今日签到` / `签到领额度`
+  现在都会真的点，之前会直接判成已签，退出码还是 0。
+- 新增 `FAILED` 结果码（退出码 10）。页面提示「已抢完」「活动结束」「签到失败」
+  时不再报 `success`。
+- `login` 写结果时带 `command=login`，不再污染当天的签到幂等判断。之前扫完码
+  登录，当天 `silent` 会直接跳过。
+- `silent-poll` 补上幂等检查，和 README 写的「同 silent」一致。
+- `expires` 归一化：0 和负数当会话 Cookie，毫秒时间戳换算成秒。之前传 0 的
+  Cookie 不会发送，传毫秒会让 Playwright 直接抛错。
+- `_has_session` 改用 `SESSION_COOKIE_NAMES`，`sessionid_ss` / `sid_tt` 也能识别。
+- 凭据降级链改成可回落：`AUTH_ERROR` 后跳过失效来源，用下一个凭据重试一次。
+- 导航检查 HTTP 状态，4xx/5xx 归 `NETWORK`；用 `NavigationError` 替代字符串匹配。
+- 时区显式成 UTC+8。`last-result.json` 同时写 `saved_at` 和 `saved_at_utc`，
+  幂等判断按北京时间算「今天」。
+- 失败才截图，保留最近 30 张；`data/` 和截图目录权限 700，结果和日志 600。
+- `doctor` 实际写探针文件检查目录权限，`problems` 不再打成 Python list。
+- `--notify-webhook`：只在需要关注的结果上 POST；`--block-resources`：拦截图片、
+  字体、媒体。
+- 新增 `deploy/` 三套定时任务配置和 `Dockerfile`。
+- 结果码收成一份 `META` 表，`REPORTS` / `EXIT_CODES` / `NEEDS_ATTENTION` 自动派生。
+- 工程化：mypy 清零，ruff 加 S/PTH/RET/SIM/C4/ARG 规则，`ruff format` 门禁，
+  覆盖率门槛 75%，CI 加 3.13 和 Windows/macOS smoke，打包验证。
+- 测试从 56 个加到 109 个，覆盖率从 45% 到 78%，新增 11 个真实浏览器场景。
+
 ## 0.1.1 - 2026-11-22
 
 修客户端凭据的可用性问题，之前两条「零配置」路径解出来的 Cookie 都是脏的。

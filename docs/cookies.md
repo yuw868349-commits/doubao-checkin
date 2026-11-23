@@ -26,7 +26,7 @@ python checkin.py run
 python checkin.py login
 ```
 
-会弹出一个浏览器窗口，扫码登录后自动把 `doubao.com` 的 Cookie 写到 `data/cookies.json`，权限 600；同时保留 `data/profile` 持久化登录态。脚本检测到 `sessionid` 就继续，不用回终端按键。
+会弹出一个浏览器窗口，扫码登录后自动把 `doubao.com` 的 Cookie 写到 `data/cookies.json`，权限 600；同时保留 `data/profile` 持久化登录态。脚本检测到会话 Cookie 就继续，不用回终端按键。`login` 的结果不会写进签到状态，登录完可以直接跑 `silent`。
 
 ## 三、自己粘贴 Cookie
 
@@ -48,7 +48,7 @@ python checkin.py login
 {"cookie": "sessionid=...; sid_guard=..."}
 ```
 
-最少需要 `sessionid`（或 `sessionid_ss`、`sid_tt` 之一）。`expires` 可以省略，脚本不会自己造过期时间。
+最少需要 `sessionid`（或 `sessionid_ss`、`sid_tt`、`sid_guard` 之一）。`expires` 可以省略；传 0 或负数会当会话 Cookie，传毫秒时间戳会换算成秒。
 
 ## GitHub Actions
 

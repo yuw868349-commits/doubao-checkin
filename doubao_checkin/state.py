@@ -1,15 +1,30 @@
 """页面状态判断。
 
-豆包的签到卡片改过几版文案，判断逻辑集中在这里，改版时只改这几行。
+豆包的签到卡片改过几版文案，判断逻辑集中在这里，改版时只改这几块表。
 """
 
 from __future__ import annotations
 
-CLICK_TEXTS = ("立即签到", "立即领取", "签到领额度", "今日签到", "签到")
+# 不收裸「签到」：它是「已签到」「签到成功」的子串，会把已签页面判成可点
+CLICK_TEXTS = ("立即签到", "立即领取", "签到领额度", "今日签到")
 SUCCESS_TEXTS = ("签到成功", "领取成功")
 ALREADY_TEXTS = ("已签到", "明日再来", "今日已领")
+FAILURE_TEXTS = (
+    "已抢完",
+    "抢光了",
+    "已领完",
+    "活动结束",
+    "活动已结束",
+    "签到失败",
+    "领取失败",
+    "系统繁忙",
+    "操作频繁",
+    "稍后再试",
+)
 
-ENTRY_TEXTS = ("免费领额度", "领额度", "积分")
+CARD_TITLES = ("每日签到",)
+
+ENTRY_TEXTS = ("免费领额度", "领额度")
 
 # 页面上一出现这些字样就说明签到卡片已经渲染出来，不需要再判登录。
 # 故意不收裸「签到」「积分」：这两个词在登录页的推广文案里也会出现。
@@ -31,25 +46,40 @@ CLIENT_ONLY_TEXTS = (
 )
 
 
-def is_signed(body: str) -> bool:
-    """卡片在、按钮不在，就算已签。
+def card_state(body: str) -> str:
+    """返回 clickable / signed / failed / unknown / absent。
 
-    这条比找「已签到」文案可靠：任务卡片是常驻的，签到后按钮会变成对勾，
-    页面正文里不一定留「已签到」三个字。
+    判断顺序按确定性从高到低：
+    1. 失败文案最具体，先判；
+    2. 只要还有可点的签到文案，就视为未签，按钮优先于「已签到」文案；
+    3. 明确的已签文案；
+    4. 卡片标题在但状态不明，返回 unknown，不能猜成已签；
+    5. 什么都没有，absent。
     """
-    if "每日签到" in body and "立即签到" not in body:
-        return True
-    return any(text in body for text in ALREADY_TEXTS)
+    if any(text in body for text in FAILURE_TEXTS):
+        return "failed"
+    if any(text in body for text in CLICK_TEXTS):
+        return "clickable"
+    if any(text in body for text in ALREADY_TEXTS):
+        return "signed"
+    if any(text in body for text in CARD_TITLES):
+        return "unknown"
+    return "absent"
+
+
+def is_signed(body: str) -> bool:
+    """页面明确显示已签。标题在、按钮不在但也没有已签文案时返回 False。"""
+    return card_state(body) == "signed"
 
 
 def classify(body: str, clicked: bool) -> str:
-    """返回 success / already / unknown。
-
-    点过按钮后按钮消失，只能靠 clicked 区分「刚刚签上」和「本来就签过」。
-    """
+    """返回 success / already / FAILED / unknown。"""
+    state = card_state(body)
+    if state == "failed":
+        return "FAILED"
     if any(text in body for text in SUCCESS_TEXTS):
         return "success"
-    if is_signed(body):
+    if state == "signed":
         return "success" if clicked else "already"
     return "unknown"
 

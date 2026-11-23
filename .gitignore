@@ -13,3 +13,8 @@ cookies.json
 *.log
 .env
 .DS_Store
+
+# 测试产物
+.coverage
+coverage.xml
+htmlcov/

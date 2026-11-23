@@ -1,2 +1,2 @@
-playwright>=1.40
-pycryptodome>=3.19
+# 依赖以 pyproject.toml 为准，这里只留一个入口给 pip install -r 的老流程
+-e .
