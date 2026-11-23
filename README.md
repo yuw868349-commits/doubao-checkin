@@ -35,7 +35,7 @@ cd doubao-checkin
 
 python3 -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install ".[dev]"
+pip install .
 python -m playwright install chromium
 
 python checkin.py doctor
