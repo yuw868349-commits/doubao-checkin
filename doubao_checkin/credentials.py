@@ -69,7 +69,7 @@ def _as_expires(raw: object) -> float:
             return -1.0
     if value <= 0:
         return -1.0
-    # 有些导出工具给的是毫秒时间戳，Playwright 只认秒，直接传会抛错
+    # 有些导出工具给的是毫秒时间戳，统一换算成秒
     if value > 1e11:
         value /= 1000.0
     return value
@@ -261,7 +261,7 @@ def _chrome_time(value: object) -> float:
 
 
 def _build_cookies(rows: list[tuple], decrypt) -> tuple[list[dict], list[str]]:
-    """把库里的行解成 Playwright 能吃的 Cookie，单条失败不影响其它条。"""
+    """把库里的行解成标准 Cookie 结构，单条失败不影响其它条。"""
     cookies: list[dict] = []
     errors: list[str] = []
     for host, name, enc, cookie_path, expires, http_only, secure, same_site in rows:

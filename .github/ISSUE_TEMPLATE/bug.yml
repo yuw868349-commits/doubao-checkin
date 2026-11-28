@@ -5,8 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        请不要把 Cookie、截图里的账号信息或完整日志贴上来。
-        截图只保留活动卡片区域就够了。
+        请不要把 Cookie 或完整日志贴上来。
 
   - type: dropdown
     id: platform

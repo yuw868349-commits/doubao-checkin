@@ -8,4 +8,4 @@
 
 - [ ] `pytest` 通过
 - [ ] `ruff check .` 通过
-- [ ] 没有提交任何真实 Cookie 或截图
+- [ ] 没有提交任何真实 Cookie 或运行产物
