@@ -1,6 +1,6 @@
 """找登录凭据。
 
-优先级：环境变量 → data/cookies.json → 客户端凭据 → data/profile。
+优先级：环境变量 → data/cookies.json → 客户端凭据（macOS/Windows）。
 每个平台的客户端存储格式不一样，这里只做读取，不写回。
 """
 
@@ -602,18 +602,13 @@ def load_credential(exclude: set[str] | None = None) -> Credential:
         if win:
             candidates.append(win)
 
-    # 客户端凭据不可用时还能退回持久化 profile
-    if config.PROFILE_DIR.exists() and "profile" not in exclude:
-        candidates.append(Credential(mode="profile", profile_dir=config.PROFILE_DIR))
-
     for candidate in candidates:
         if candidate.mode not in exclude:
             return candidate
 
     message = (
         "没有找到登录凭据。macOS/Windows 请先登录豆包电脑版；"
-        "Linux 请设置 DOUBAO_COOKIES_JSON 或 data/cookies.json；"
-        "也可以运行 python checkin.py login"
+        "Linux 请设置 DOUBAO_COOKIES_JSON 或 data/cookies.json"
     )
     if problems:
         message = "；".join(problems) + "。" + message

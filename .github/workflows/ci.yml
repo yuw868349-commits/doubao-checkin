@@ -25,7 +25,6 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy
-      - run: playwright install --with-deps chromium
       - run: pytest --cov=doubao_checkin --cov-report=term-missing --cov-fail-under=75
       - run: python -m build
       - run: twine check dist/*
@@ -46,4 +45,4 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev]"
       - run: ruff check .
-      - run: pytest -m "not browser" -q
+      - run: pytest -q

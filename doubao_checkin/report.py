@@ -25,6 +25,7 @@ class Result(str, Enum):
     NETWORK = "NETWORK"
     TIMEOUT = "TIMEOUT"
     BROWSER = "BROWSER"
+    SIGNIN_CLOSED = "SIGNIN_CLOSED"
     NO_CREDENTIAL = "NO_CREDENTIAL"
     UNKNOWN = "unknown"
     FAILED = "FAILED"
@@ -42,12 +43,15 @@ class ResultMeta:
 META: dict[str, ResultMeta] = {
     Result.SUCCESS.value: ResultMeta("签到成功，额度已到账", 0, False),
     Result.ALREADY.value: ResultMeta("今天已经签过，没有重复领取", 0, False),
-    Result.UNKNOWN.value: ResultMeta("页面状态没认出来，建议看截图", 8, True),
+    Result.UNKNOWN.value: ResultMeta("接口返回了没见过的状态", 8, True),
     Result.AUTH_ERROR.value: ResultMeta("登录态失效，需要重新登录", 2, True),
     Result.CLIENT_ONLY.value: ResultMeta("活动页把当前会话判定成网页端，拒绝签到", 3, True),
-    Result.NETWORK.value: ResultMeta("页面打不开，重试后仍然失败", 4, True),
-    Result.TIMEOUT.value: ResultMeta("时间预算用完或页面操作超时", 5, True),
-    Result.BROWSER.value: ResultMeta("浏览器或 Playwright 环境有问题", 6, True),
+    Result.SIGNIN_CLOSED.value: ResultMeta(
+        "平台已下线网页端签到入口，接口仍在但本账号/本时段不可用", 11, True
+    ),
+    Result.NETWORK.value: ResultMeta("接口打不开，重试后仍然失败", 4, True),
+    Result.TIMEOUT.value: ResultMeta("时间预算用完或请求超时", 5, True),
+    Result.BROWSER.value: ResultMeta("历史结果码：浏览器模式已移除，保留兼容", 6, True),
     Result.NO_CREDENTIAL.value: ResultMeta("没有找到登录凭据", 7, True),
     Result.FAILED.value: ResultMeta("页面明确提示签到失败，额度没有到账", 10, True),
     Result.ERROR.value: ResultMeta("运行时出现未预期异常", 9, True),

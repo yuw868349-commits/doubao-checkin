@@ -1,4 +1,7 @@
-"""运行参数集中在这里，尽量不散落在代码里。"""
+"""运行参数集中在这里，尽量不散落在各处。
+
+本仓库只走 HTTP API，不启动浏览器。
+"""
 
 from __future__ import annotations
 
@@ -12,57 +15,53 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # 数据目录允许被环境变量挪走，方便容器和 CI 挂载
 DATA_DIR = pathlib.Path(os.environ.get("DOUBAO_DATA_DIR", REPO_ROOT / "data")).expanduser()
-PROFILE_DIR = DATA_DIR / "profile"
-SHOTS_DIR = DATA_DIR / "shots"
 LOG_FILE = DATA_DIR / "checkin.log"
 RESULT_FILE = DATA_DIR / "last-result.json"
 COOKIE_FILE = DATA_DIR / "cookies.json"
 
-START_URL = "https://www.doubao.com/"
-ACTIVITY_URL = "https://www.doubao.com/pc/agent-explore"
+SITE = "https://www.doubao.com"
 
-# 豆包的签到周期按北京时间算，别跟系统时区走。
-# 固定 UTC+8，不依赖 tzdata，Windows 上也能跑。
-CN_TZ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
+# 活动与额度接口
+CAMPAIGN_GROUP = "pc_incentive_task_mvp_v3"
+DETAIL_PATH = "/alice/ug/campaign/v3/detail/"
+LIST_PATH = "/alice/ug/campaign/list/"
+RECORDS_PATH = "/alice/ug/campaign/quota/records/"
+REPORT_PATH = "/alice/ug/campaign/landing/report"
+CHECKIN_PATH = "/alice/ug/campaign/landing/checkin"
+CLAIM_PATH = "/alice/ug/campaign/item/reward/claim/"
 
-# 活动页前端会检查 navigator.userAgent 里有没有 SamanthaDoubao 标识。
-# 这个版本号只是让页面把请求当成电脑版客户端；官方一改校验就会失效。
+# 豆包的活动接口按客户端信封校验，缺了这些 query 参数会回 invalid param
+CLIENT_PARAMS: dict[str, str] = {
+    "version_code": "20800",
+    "language": "zh",
+    "device_platform": "web",
+    "doubao_device_platform": "web",
+    "aid": "497858",
+    "real_aid": "497858",
+    "pkg_type": "release_version",
+    "pc_version": "2.33.3",
+    "doubao_pc_version": "5.76.11",
+    "region": "CN",
+    "sys_region": "CN",
+    "samantha_web": "1",
+    "web_platform": "desktop",
+    "use-olympus-account": "1",
+    "runtime_version": "5.76.11",
+    "runtime": "web",
+}
+
+# 活动接口认这个 UA 里的电脑版客户端标识
 CLIENT_UA_VERSION = os.environ.get("DOUBAO_CLIENT_UA_VERSION", "2.33.3")
-
-if sys.platform == "darwin":
-    _UA_BASE = (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-    )
-else:
-    _UA_BASE = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-    )
-
+_UA_BASE = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+)
 CLIENT_UA = f"{_UA_BASE} SamanthaDoubao/{CLIENT_UA_VERSION}"
 
-VIEWPORT = {"width": 1280, "height": 900}
+# 豆包的签到周期按北京时间算，别跟系统时区走。
+CN_TZ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
 
-
-class Timing:
-    """浏览器流程里的等待时间，单位毫秒，集中在这里改。"""
-
-    PAGE_SETTLE = 2_500
-    READY_TIMEOUT = 15.0
-    READY_POLL = 500
-    BODY_TIMEOUT = 3_000
-    GOTO_TIMEOUT = 45_000
-    CLICK_TIMEOUT = 5_000
-    CLICK_SETTLE = 1_500
-    ENTRY_SETTLE = 2_000
-    BUTTON_RETRY = 3
-    BUTTON_RETRY_WAIT = 3_000
-    SCREENSHOT_KEEP = 30
-
-
-# 整次运行的时间预算，单位秒。要小于定时任务自己的超时，别让人家把你强杀了。
-BUDGET_SECONDS = int(os.environ.get("DOUBAO_BUDGET_SECONDS", "300"))
+REFERER = "https://www.doubao.com/pc/agent-explore"
 
 # 会话类 Cookie，用来估算登录态还剩多少天，也用来判断凭据里有没有登录态
 SESSION_COOKIE_NAMES = (
@@ -74,19 +73,26 @@ SESSION_COOKIE_NAMES = (
     "uid_tt",
 )
 
-# 这些资源对签到判断没用，--block-resources 打开时直接拦掉
-BLOCKED_RESOURCE_TYPES = {"image", "font", "media"}
 
+class Timing:
+    """网络参数集中在这里改。"""
+
+    TIMEOUT = float(os.environ.get("DOUBAO_TIMEOUT", "20"))
+    RETRIES = int(os.environ.get("DOUBAO_RETRIES", "2"))
+    BACKOFF = (1.0, 3.0)
+    BUDGET_SECONDS = int(os.environ.get("DOUBAO_BUDGET_SECONDS", "120"))
+    POLL_INTERVAL = int(os.environ.get("DOUBAO_POLL_INTERVAL", "600"))
+    POLL_WINDOW = int(os.environ.get("DOUBAO_POLL_WINDOW", "21600"))
+
+
+BUDGET_SECONDS = Timing.BUDGET_SECONDS
 NOTIFY_TIMEOUT = 10
 
 
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
-    for path in (DATA_DIR, SHOTS_DIR):
-        # Windows 上 chmod 不生效
-        with contextlib.suppress(OSError):
-            path.chmod(0o700)
+    with contextlib.suppress(OSError):
+        DATA_DIR.chmod(0o700)
 
 
 def writable(path: pathlib.Path) -> tuple[bool, str | None]:
@@ -99,3 +105,7 @@ def writable(path: pathlib.Path) -> tuple[bool, str | None]:
         return True, None
     except OSError as exc:
         return False, str(exc)
+
+
+def python_ok() -> bool:
+    return sys.version_info >= (3, 10)

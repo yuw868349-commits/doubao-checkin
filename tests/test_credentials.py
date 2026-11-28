@@ -320,34 +320,34 @@ def test_win_master_key_handles_broken_json(tmp_path):
 # ---------------------------------------------------------------- 降级链
 
 
-def test_load_credential_skips_excluded_mode(tmp_path, monkeypatch):
+def test_load_credential_uses_injected(tmp_path, monkeypatch):
     monkeypatch.setattr(
         credentials,
         "_load_injected",
         lambda: credentials.Credential([{"name": "sessionid", "value": "x"}], mode="env"),
     )
-    monkeypatch.setattr(credentials.config, "PROFILE_DIR", tmp_path / "profile")
-    (tmp_path / "profile").mkdir()
-
-    cred = credentials.load_credential(exclude={"env"})
-    assert cred.mode == "profile"
+    cred = credentials.load_credential()
+    assert cred.mode == "env"
+    assert cred.cookies[0]["name"] == "sessionid"
 
 
-def test_load_credential_survives_bad_env(tmp_path, monkeypatch):
+def test_load_credential_excludes_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        credentials,
+        "_load_injected",
+        lambda: credentials.Credential([{"name": "sessionid", "value": "x"}], mode="env"),
+    )
+    monkeypatch.setattr(credentials, "_load_windows", lambda: None)
+    with pytest.raises(RuntimeError, match="没有找到登录凭据"):
+        credentials.load_credential(exclude={"env"})
+
+
+def test_load_credential_reports_problems_when_empty(tmp_path, monkeypatch):
     def boom():
         raise RuntimeError("DOUBAO_COOKIES_JSON 解析失败")
 
     monkeypatch.setattr(credentials, "_load_injected", boom)
-    monkeypatch.setattr(credentials.config, "PROFILE_DIR", tmp_path / "profile")
-    (tmp_path / "profile").mkdir()
-
-    cred = credentials.load_credential()
-    assert cred.mode == "profile"
-
-
-def test_load_credential_reports_problems_when_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(credentials, "_load_injected", lambda: None)
-    monkeypatch.setattr(credentials.config, "PROFILE_DIR", tmp_path / "missing")
+    monkeypatch.setattr(credentials, "_load_windows", lambda: None)
     with pytest.raises(RuntimeError, match="没有找到登录凭据"):
         credentials.load_credential()
 

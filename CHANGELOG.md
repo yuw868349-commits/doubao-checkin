@@ -1,5 +1,25 @@
 # 更新记录
 
+## 0.3.0 - 2026-11-28
+
+**改成纯 API，删掉 Playwright。** 仓库不再下载 Chromium，不再截图，不再开页面。
+
+- 新增 `doubao_checkin/api.py`：标准库 HTTP 客户端，自动拼客户端信封 query
+  （`aid`、`version_code`、`pc_version`、`web_tab_id` 等）、带 Cookie 与
+  `Agw-Js-Conv: str`，失败重试与退避。
+- 新增 `doubao_checkin/campaign.py`：任务解析、额度流水、签到、领奖。
+  签到先 `landing/report` 上报 click，再 `landing/checkin`。
+- 新增结果码 `SIGNIN_CLOSED`（退出码 11）：服务端以 `710010702` 拒绝签到，
+  说明网页端签到入口被平台下线。页面自己带 `msToken`+`a_bogus` 的请求同样被拒，
+  不是签名问题。
+- `claim` 只认任务完成后服务端下发的字符串 `task_id`，传数字会 HTTP 400。
+- 删除 `runner.py`、`state.py`、截图与 profile 回落；`credentials.py` 只保留
+  环境变量 → `data/cookies.json` → macOS/Windows 客户端。
+- 命令改为 `run` / `silent` / `silent-poll` / `tasks` / `claim` / `records` /
+  `status` / `doctor`，全部 HTTP。
+- Docker 基镜像从 Playwright 换成 `python:3.12-slim`；CI 去掉 Chromium 安装；
+  GitHub Actions 去掉截图上传。
+
 ## 0.2.0 - 2026-11-23
 
 按代码审计结果修了一轮，重点是「没签到却显示成功」的静默失败。

@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:v1.58.0-jammy
+FROM python:3.12-slim
 
 WORKDIR /app
 COPY pyproject.toml README.md ./
@@ -10,4 +10,4 @@ ENV DOUBAO_DATA_DIR=/data
 VOLUME ["/data"]
 
 ENTRYPOINT ["python", "checkin.py"]
-CMD ["run", "--block-resources"]
+CMD ["run", "--json"]

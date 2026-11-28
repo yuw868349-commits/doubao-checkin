@@ -26,7 +26,6 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e .
-      - run: playwright install --with-deps chromium
       - name: Run check-in
         env:
           DOUBAO_COOKIES_JSON: ${{ secrets.DOUBAO_COOKIES_JSON }}
@@ -35,15 +34,7 @@ jobs:
             echo "::error::DOUBAO_COOKIES_JSON 没有配置，签到没有执行。"
             exit 1
           fi
-          python checkin.py run --json --block-resources
-      - name: Upload failure screenshots
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: checkin-shots
-          path: data/shots/*.png
-          if-no-files-found: ignore
-          retention-days: 7
+          python checkin.py run --json
       - name: Write summary
         if: always()
         run: |

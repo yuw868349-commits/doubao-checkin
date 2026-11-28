@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "doubao-checkin"
 dynamic = ["version"]
-description = "Automate the daily check-in on Doubao's credit page."
+description = "Automate Doubao's daily check-in and campaign rewards over the HTTP API."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "yuw868349-commits"}]
-keywords = ["doubao", "checkin", "playwright", "automation"]
+keywords = ["doubao", "checkin", "api", "automation"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -23,7 +23,6 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "playwright>=1.40,<2",
     "pycryptodome>=3.19,<4",
 ]
 
@@ -81,11 +80,10 @@ warn_unused_ignores = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-markers = ["browser: 需要 Playwright Chromium 的集成测试"]
 
 [tool.coverage.run]
 source = ["doubao_checkin"]
-concurrency = ["thread", "greenlet"]
+concurrency = ["thread"]
 
 [tool.coverage.report]
 exclude_lines = [
